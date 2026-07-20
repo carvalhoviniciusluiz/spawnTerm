@@ -1,3 +1,13 @@
+> # spawnTerm
+> **This repository is [spawnTerm](spawnterm/README.md)** — a project to orchestrate multiple AI
+> coding agents across **iTerm2** tabs/panes (spawn, cross-tab messaging, durable handoffs, status
+> board). It is a **fork of iTerm2**; the iTerm2 source and README below are relevant **only for
+> Tier 4** (upstream core PRs). **Start at [Epic #1](../../issues/1) and [`spawnterm/`](spawnterm/).**
+>
+> ---
+>
+> _iTerm2's original README follows._
+
 <div align="center">
 
 # iTerm2
