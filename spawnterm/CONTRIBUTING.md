@@ -1,0 +1,23 @@
+# Contributing to spawnTerm
+
+**Agents:** read `AGENTS.md` first. This file is the human + agent workflow.
+
+## One issue → one branch → one PR
+1. Pick a **`ready-for-agent`**, unassigned, non-`status:blocked` issue (start from **Epic #1**).
+2. **Claim:** `gh issue edit N --add-assignee @me --add-label status:in-progress` + a claim comment.
+3. Branch: `feat/<tier>-<slug>` (e.g. `feat/tier0-escape-emit`).
+4. Build under `spawnterm/` (Tiers 0–3). Do **not** modify iTerm2 source unless the issue is
+   `scope:iterm2-core` (Tier 4 — discuss upstream first).
+5. Open a **draft PR** early with `Closes #N`; keep the issue comment thread updated as your log.
+6. Ready for review → mark the PR ready. Merge to the default branch closes the issue.
+
+## Definition of Done
+Each issue lists its own DoD checkboxes. Don't close an issue whose DoD isn't fully checked.
+
+## Scope tags
+- `scope:external-tooling` — runs on iTerm2's API/escape codes; lives in `spawnterm/`.
+- `scope:iterm2-core` — changes iTerm2 source; upstream PR to `gnachman/iTerm2` from this fork.
+
+## Durable log
+The **issue comment thread** is the source of continuity. Post progress, evidence, and the next
+step so a fresh agent can resume without any chat/session context.
