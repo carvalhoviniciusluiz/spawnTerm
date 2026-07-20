@@ -1,0 +1,37 @@
+name: Tier task (agent-actionable)
+description: A spawnTerm task any agent can pick up from zero (issue = spec).
+title: "[Tier N] <short title>"
+labels: ["type:feature", "status:blocked"]
+body:
+  - type: textarea
+    id: problem
+    attributes: { label: Problem / context, description: What and where. }
+    validations: { required: true }
+  - type: textarea
+    id: why
+    attributes: { label: Why / what for, description: Link to Epic #1 and any ADR/decision. }
+    validations: { required: true }
+  - type: dropdown
+    id: scope
+    attributes: { label: Scope, options: ["external-tooling (runs on iTerm2 API; lives in spawnterm/)", "iterm2-core (modifies iTerm2 source; upstream PR)"] }
+    validations: { required: true }
+  - type: input
+    id: deps
+    attributes: { label: Depends on (blocked-by), description: "Issue numbers, e.g. #3. Leave empty if none." }
+  - type: textarea
+    id: dod
+    attributes: { label: Definition of Done, description: Checkboxes; the agent's exit test., value: "- [ ] \n- [ ] \n" }
+    validations: { required: true }
+  - type: textarea
+    id: steps
+    attributes: { label: Step-by-step / sub-tasks, value: "1. \n2. \n" }
+    validations: { required: true }
+  - type: textarea
+    id: nongoals
+    attributes: { label: Non-goals, description: Explicit scope fence. }
+  - type: textarea
+    id: entry
+    attributes: { label: Files / entry points, description: "path:line pointers, relevant commands, docs." }
+  - type: dropdown
+    id: effort
+    attributes: { label: Effort, options: ["S", "M", "L"] }
