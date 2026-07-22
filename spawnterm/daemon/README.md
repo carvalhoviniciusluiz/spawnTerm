@@ -170,11 +170,74 @@ like every capability — **defaults OFF**. When it is OFF the daemon still
 parses and logs each ingested envelope but does **not** route. Turn it on with
 `spawnterm-flag enable spawnterm.messaging`.
 
-> **Best-effort only (non-goal here).** This is an in-memory relay: no queue,
-> replay, ack, retry, or ordering. If the target session is absent the message
-> is undeliverable; if it is present the text is injected and may be lost if the
+> **Best-effort in-memory relay (the #28 fallback).** No queue, replay, ack,
+> retry, or ordering. If the target session is absent the message is
+> undeliverable; if it is present the text is injected and may be lost if the
 > agent is busy. The durable inbox + ack path is **Tier 2 (#4)** — precisely the
-> gap this best-effort relay leaves open.
+> gap the #37 bridge below closes when the broker is up.
+
+## Daemon↔broker bridge (Tier 2.4, #37)
+
+The bridge is the **glue** that upgrades the #28 in-memory relay to the Tier 2
+**durable broker** (`spawnterm/broker`, #34/#35/#36) whenever the broker is
+reachable, and falls back to #28 when it is not. It is pure glue: it does **not**
+reimplement iTerm2 transport (it reuses this daemon) and does **not** put durable
+state in iTerm2 (it reuses the broker). All the decision logic lives in the
+iTerm2-free `bridge.py` (unit-tested with a fake broker client + fake screen
+text in `tests/test_bridge.py`); `adapter.py` only supplies the iTerm2 reads and
+writes.
+
+### Two flags: `spawnterm.messaging` × `spawnterm.broker`
+
+| `spawnterm.messaging` | `spawnterm.broker` (+ broker reachable) | Mode |
+| --- | --- | --- |
+| OFF | — | **off** — parse/log only, no relay at all |
+| ON | OFF or unreachable | **in-memory** — the #28 best-effort router |
+| ON | ON and reachable | **durable** — broker mailbox + ack |
+
+The **durable** path needs **both** flags on *and* a live broker; messaging-only
+(or a down broker) falls back to in-memory; messaging-off is a no-op. On startup
+the daemon best-effort-connects to the broker (`bridge.connect_broker` pings it);
+a missing/down broker just means no client, so the daemon runs in-memory only.
+The daemon **never crashes because the broker is down** — every broker call is
+wrapped and degrades on failure.
+
+### Ingest → durable send
+
+An ingested `custom_escape_sequence` envelope is handed to
+`Bridge.handle_ingest`. In **durable** mode it becomes a `broker send
+{to,from,body}` (enqueued in the durable mailbox — delivery happens later by
+polling) instead of the in-memory route. If that send fails, ingest degrades to
+the #28 in-memory route for that message and logs `degraded`.
+
+### Delivery → poll + inject + ack-by-observation
+
+A delivery poll loop (`_delivery_loop`, ~1 s cadence, only when a broker is
+present) drives `Bridge.deliver_once`: for every recipient key addressable by a
+live session (the union of each session's `agent_id` / `agent_role`), it `poll`s
+the mailbox, resolves each un-acked message against the live registry with the
+same #28 precedence (id-before-role, fan-out, self-guard), and injects the
+delivery line `[spawnterm#<id>] message from <sender>: <body>` into each target.
+
+**Ack-by-observation heuristic.** After injecting, the daemon reads the target's
+visible screen (`async_get_screen_contents`). A message counts as **observed**
+iff its unique marker `[spawnterm#<id>]` appears in that screen text — i.e. the
+injected bytes reached the session and were echoed. Only an observed message is
+`ack`ed on the broker; an un-observed one is left un-acked and **replayed** on
+the next poll (at-least-once until observed). The predicate is the pure
+`was_observed(screen_text, marker)` — unit-tested in isolation (marker present →
+ack; absent/empty → no ack). (Edge: a self-addressed message has no non-sender
+target, so it is never observed and stays durable — acceptable, it is the
+sender's own message.)
+
+### Registry population (#36)
+
+Daemon lifecycle events keep the **durable** broker registry in sync with live
+sessions (gated on `spawnterm.broker`): `new_session` → `broker register
+{session_id, role, task, alive:true}`, `terminate_session` → `broker touch
+{session_id, alive:false}`. The role/task come from the dot-free `user.agent_*`
+vars read at register time. This is independent of the messaging relay — the
+registry reflects liveness even with messaging off.
 
 ## Agent dashboard (status-bar component, #29)
 
@@ -238,8 +301,9 @@ without the `iterm2` package:
 | `envelope.py` | **pure** | `parse_envelope` → `Envelope` / `ParseResult`. |
 | `spawn.py` | **pure** | `build_spawn_plan` → `SpawnPlan`: cwd resolution + ordered dot-free identity vars (#27). |
 | `router.py` | **pure** | `route` / `route_if_enabled` → `RoutingDecision`; `messaging_enabled` gate (#28). |
+| `bridge.py` | **pure** (+ in-repo broker client I/O; no `iterm2`) | `Bridge` + `select_mode` / `build_send_op` / `was_observed` / `recipient_keys` / registry-op builders: durable-vs-in-memory glue, ack-by-observation, `connect_broker` (#37). |
 | `dashboard.py` | pure core + lazy `import iterm2` | `format_component` / `PALETTE` (pure, tested) + the `StatusBarComponent` wiring (#29). |
-| `adapter.py` | lazy `import iterm2` | `DaemonAdapter`: monitor events → registry; `spawn_agent` executes a `SpawnPlan`; delivers routed text. |
+| `adapter.py` | lazy `import iterm2` | `DaemonAdapter`: monitor events → registry + broker registry; `spawn_agent` executes a `SpawnPlan`; hands ingest to the bridge; delivery poll loop + the injected screen read/send. |
 | `spawnterm_daemon.py` | lazy `import iterm2` | entry point: CLI, flag gate, `run_forever`, `spawn` subcommand. |
 
 `iterm2` is imported **only inside methods**, never at module top-level, so the
@@ -256,5 +320,8 @@ transition, envelope parse (valid + every malformed case), spawn-plan cwd
 resolution (inherit / `--dir` / `--home` / mutual-exclusion) and the identity var
 plan (dot-free names, order, gate-off omits identity), routing (id/role
 precedence, fan-out, self-guard, undeliverable cases, the `spawnterm.messaging`
-gate), the status-bar dashboard formatter (#29), the default-OFF daemon flag
+gate), the #37 bridge (mode selection across both flags, envelope→`send` op,
+durable/in-memory/degraded ingest, delivery polling, ack-by-observation, and
+registry population — all with a fake broker client + fake screens, no live
+socket), the status-bar dashboard formatter (#29), the default-OFF daemon flag
 gate, and the guarantee that no daemon module imports `iterm2` at load time.
