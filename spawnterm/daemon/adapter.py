@@ -199,3 +199,54 @@ class DaemonAdapter:
             raise
         except Exception as exc:  # noqa: BLE001 - a dead session shouldn't crash us
             self.log.debug("prompt monitor ended for %s: %s", session_id, exc)
+
+    # -- spawn (Tier 1.2, #27) -------------------------------------------
+    # Self-contained block: executes a pure spawn.SpawnPlan by opening a tagged
+    # agent tab. iterm2 is imported lazily here too. The plan (cwd + ordered
+    # dot-free user.agent_* assignments) is computed by the pure spawn module;
+    # this method only does the iTerm2 I/O.
+
+    async def spawn_agent(self, plan, command: str):
+        """Open a new tab running ``command`` in ``plan.cwd`` and stamp identity.
+
+        Creates the tab in the current terminal window (or a fresh window if
+        none is open), inheriting/overriding cwd via a write-only profile
+        customization, then applies each ``(name, value)`` in ``plan.variables``
+        with ``async_set_variable``. The names are dot-free ``user.agent_*``
+        keys; when the ``spawnterm.status_board`` gate was OFF the caller built
+        an empty variable list, so the tab spawns untagged. Returns the new
+        session.
+        """
+        import iterm2  # lazy: keep the top-level import iterm2-free.
+
+        app = await iterm2.async_get_app(self.connection)
+        customizations = iterm2.LocalWriteOnlyProfile()
+        if plan.cwd:
+            customizations.set_working_directory(plan.cwd)
+
+        window = app.current_terminal_window
+        if window is None:
+            window = await iterm2.Window.async_create(
+                self.connection,
+                command=command,
+                profile_customizations=customizations,
+            )
+            session = window.current_tab.current_session
+        else:
+            tab = await window.async_create_tab(
+                command=command,
+                profile_customizations=customizations,
+            )
+            session = tab.current_session
+
+        for name, value in plan.variables:
+            await session.async_set_variable(name, value)
+
+        self.log.info(
+            "spawned agent session %s in %s (tagged=%s, %d var(s))",
+            getattr(session, "session_id", "?"),
+            plan.cwd,
+            plan.tagged,
+            len(plan.variables),
+        )
+        return session
