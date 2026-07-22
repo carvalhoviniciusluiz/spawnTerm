@@ -11,7 +11,7 @@ registry calls and logs ingested envelopes.
 Wiring:
   * ``NewSessionMonitor`` / ``SessionTerminationMonitor`` → registry add/remove.
   * ``CustomControlSequenceMonitor(identity="spawnterm")`` → envelope ingest
-    (parse + structured log only; routing is #28).
+    (parse + structured log, then best-effort route via ``router``, #28).
   * one ``PromptMonitor`` per session → mark the session idle (awaiting input).
 
 Nothing here is exercised by CI (iTerm2 is unavailable); the testable logic is
@@ -25,6 +25,7 @@ import logging
 
 from envelope import parse_envelope
 from registry import AGENT_VAR_KEYS, Registry
+from router import messaging_enabled, route_if_enabled
 
 # Identity string agents use in their custom control sequence:
 #   OSC 1337 ; Custom=id=spawnterm : <json payload> ST
@@ -153,10 +154,10 @@ class DaemonAdapter:
             while True:
                 match = await monitor.async_get()
                 payload = match.group(1) if match and match.groups() else ""
-                self._ingest(payload)
+                await self._ingest(payload)
 
-    def _ingest(self, payload: str) -> None:
-        """Parse and structured-log one agent envelope. Routing is #28."""
+    async def _ingest(self, payload: str) -> None:
+        """Parse, structured-log, then best-effort route one agent envelope (#28)."""
         result = parse_envelope(payload)
         if not result.ok:
             self.log.warning("ingest: dropped malformed envelope: %s", result.error)
@@ -171,6 +172,31 @@ class DaemonAdapter:
             env.known_type,
             env.body,
         )
+        # Routing (#28): gated on spawnterm.messaging (default OFF). When the
+        # flag is OFF we still parsed/logged above but do not route. Best-effort
+        # only — no durability/replay/ack/ordering (that is Tier 2 / #4).
+        decision = route_if_enabled(env, self.registry, enabled=messaging_enabled())
+        if not decision.deliverable:
+            self.log.info("route: undeliverable (%s)", decision.reason)
+            return
+        await self._deliver(decision)
+
+    async def _deliver(self, decision) -> None:
+        """Inject a deliverable decision's text into each target session."""
+        import iterm2
+
+        app = await iterm2.async_get_app(self.connection)
+        for session_id in decision.target_session_ids:
+            session = app.get_session_by_id(session_id)
+            if session is None:
+                self.log.info("route: target %s gone; message lost", session_id)
+                continue
+            await session.async_send_text(decision.text)
+            self.log.info(
+                "route: delivered to %s (matched_by=%s)",
+                session_id,
+                decision.matched_by,
+            )
 
     # -- prompt (idle) monitors ------------------------------------------
 
