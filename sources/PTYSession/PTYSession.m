@@ -85,6 +85,7 @@
 #import "iTermActionsModel.h"
 #import "iTermAddTriggerViewController.h"
 #import "iTermAdvancedSettingsModel.h"
+#import "iTermUserVarSidecar.h"
 #import "iTermAnnouncementView.h"
 #import "iTermAnnouncementViewController.h"
 #import "iTermArrangementKeys.h"
@@ -437,6 +438,12 @@ typedef NS_ENUM(NSUInteger, PTYSessionTurdType) {
 }
 @end
 
+@interface PTYSession ()
+// Durable user.* store (issue #51). Nil unless persistUserVarsToSidecar is on.
+- (iTermUserVarSidecar *)userVarSidecar;
+- (void)replayUserVarSidecar;
+@end
+
 @implementation PTYSession {
 
     NSString *_termVariable;
@@ -632,6 +639,9 @@ typedef NS_ENUM(NSUInteger, PTYSessionTurdType) {
     BOOL _metalDeviceChanging;
 
     iTermVariables *_userVariables;
+    // Lazily created durable store for user.* variables. Nil unless the
+    // persistUserVarsToSidecar advanced setting is on. See iTermUserVarSidecar.
+    iTermUserVarSidecar *_userVarSidecar;
     iTermSwiftyString *_badgeSwiftyString;
     iTermSwiftyString *_autoNameSwiftyString;
     iTermSwiftyString *_subtitleSwiftyString;
@@ -1137,6 +1147,7 @@ ITERM_WEAKLY_REFERENCEABLE
     [_announcements release];
     [_variables release];
     [_userVariables release];
+    [_userVarSidecar release];
     [_program release];
     [_customShell release];
     [_environment release];
@@ -1692,6 +1703,12 @@ ITERM_WEAKLY_REFERENCEABLE
         }
         aSession.textview.badgeLabel = aSession.badgeLabel;
     }
+
+    // Replay the durable user-var sidecar after the arrangement variables (if any)
+    // are restored. The stable id has been adopted by now, so this recovers user.*
+    // values even when the arrangement was saved without contents (which omits
+    // SESSION_ARRANGEMENT_VARIABLES). No-op unless persistUserVarsToSidecar is on.
+    [aSession replayUserVarSidecar];
 
     if (didRestoreContents && attachedToServer) {
         [aSession.screen performBlockWithJoinedThreads:^(VT100Terminal *terminal, VT100ScreenMutableState *mutableState, id<VT100ScreenDelegate> delegate) {
@@ -16509,6 +16526,9 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
         NSString *value = [kvp.secondObject stringByBase64DecodingStringWithEncoding:NSUTF8StringEncoding];
         [self.variablesScope setValue:value
                      forVariableNamed:key];
+        // Write through to the durable sidecar so identity survives session end
+        // and app restart. No-op unless the persistUserVarsToSidecar setting is on.
+        [self.userVarSidecar setValue:value forUserVariableKey:key];
         if (self.isTmuxClient) {
             [self.tmuxController setUserVariableWithKey:key
                                                   value:value
@@ -16521,12 +16541,67 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
         }
         NSString *key = [NSString stringWithFormat:@"user.%@", kvpString];
         [self.variablesScope setValue:nil forVariableNamed:[NSString stringWithFormat:@"user.%@", kvpString]];
+        // Persist the deletion too (removes the key from the sidecar).
+        [self.userVarSidecar setValue:nil forUserVariableKey:key];
         if (self.isTmuxClient) {
             [self.tmuxController setUserVariableWithKey:key
                                                   value:nil
                                                    pane:self.tmuxPane];
         }
     }
+}
+
+// Lazily creates the durable user-var store. Returns nil (and creates nothing)
+// unless the persistUserVarsToSidecar advanced setting is on, so stock behavior
+// is unchanged when the feature is off. Keyed by the session's stable id, which
+// (unlike guid) survives a shell reload and is re-adopted on arrangement restore,
+// so it is the correct durable identity for a sidecar.
+- (iTermUserVarSidecar *)userVarSidecar {
+    if (![iTermAdvancedSettingsModel persistUserVarsToSidecar]) {
+        return nil;
+    }
+    if (!_userVarSidecar) {
+        _userVarSidecar = [[iTermUserVarSidecar alloc] initWithStableID:self.stableID];
+        [self pruneUserVarSidecarsOnce];
+    }
+    return _userVarSidecar;
+}
+
+// Garbage-collect sidecars for sessions that no longer exist. Runs at most once
+// per launch (the first time any session touches its sidecar). Live sessions are
+// passed as the keep-set so their files are never pruned; the store additionally
+// only removes files older than its TTL, so a session about to be restored keeps
+// its sidecar.
+- (void)pruneUserVarSidecarsOnce {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableSet<NSString *> *live = [NSMutableSet set];
+        for (PTYSession *session in [[PTYSession sessionMap] objectEnumerator]) {
+            NSString *sid = session.stableID;
+            if (sid) {
+                [live addObject:sid];
+            }
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            [iTermUserVarSidecar pruneKeepingStableIDs:live];
+        });
+    });
+}
+
+// Replays the durable sidecar's user.* values onto the variable scope. Called on
+// arrangement restore once the stable id is settled. The sidecar is authoritative
+// for user.* keys (it is written through on every SetUserVar) so it overwrites
+// whatever the arrangement restored for the same key; in practice they agree. No-op
+// unless the persistUserVarsToSidecar setting is on.
+- (void)replayUserVarSidecar {
+    iTermUserVarSidecar *sidecar = self.userVarSidecar;
+    if (!sidecar) {
+        return;
+    }
+    NSDictionary<NSString *, NSString *> *vars = [sidecar userVariables];
+    [vars enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
+        [self.variablesScope setValue:value forVariableNamed:key];
+    }];
 }
 
 - (void)setVariableNamed:(NSString *)name toValue:(id)newValue {
