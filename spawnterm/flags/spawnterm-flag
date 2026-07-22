@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# spawnterm feature-flag helper (canonical shell implementation).
+#
+# Every spawnTerm capability is an individually toggleable, per-user feature
+# flag that defaults OFF. This is the canonical CLI; spawnterm_flag.py is the
+# byte-for-byte parity twin for Python environments.
+#
+# Config: $XDG_CONFIG_HOME/spawnterm/config.toml (falls back to
+# ~/.config/spawnterm/config.toml). Flags are quoted keys under a single
+# [features] table, e.g. "spawnterm.messaging" = true. A missing file, table,
+# or key all read as OFF. Reads never write a file.
+#
+# Docs: spawnterm/docs/feature-flags.md
+set -u
+
+PREFIX="spawnterm."
+
+# Seeded schema, canonical order. MUST stay in sync with KNOWN_FLAGS in
+# spawnterm_flag.py. Capability names only (no prefix); space-separated so
+# this works on bash 3.2 (no associative arrays).
+KNOWN_FLAGS="status_board worktree_isolation messaging agent_inbox cost_dashboard janitor mcp"
+
+err() {
+  printf 'spawnterm-flag: %s\n' "$1" >&2
+}
+
+is_known() {
+  # $1 = capability name (no prefix)
+  local cap="$1" k
+  for k in $KNOWN_FLAGS; do
+    [ "$k" = "$cap" ] && return 0
+  done
+  return 1
+}
+
+normalize() {
+  # Strip an optional leading "spawnterm." prefix. Echoes the capability name.
+  local key="$1"
+  case "$key" in
+    "$PREFIX"*) printf '%s' "${key#"$PREFIX"}" ;;
+    *)          printf '%s' "$key" ;;
+  esac
+}
+
+config_path() {
+  # Precedence: $SPAWNTERM_CONFIG > $XDG_CONFIG_HOME > ~/.config
+  if [ -n "${SPAWNTERM_CONFIG:-}" ]; then
+    printf '%s' "$SPAWNTERM_CONFIG"
+    return
+  fi
+  local base="${XDG_CONFIG_HOME:-}"
+  if [ -z "$base" ]; then
+    base="$HOME/.config"
+  fi
+  printf '%s/spawnterm/config.toml' "$base"
+}
+
+read_raw() {
+  # $1 = capability name. Echoes "true", "false", or "" (absent).
+  local cap="$1" file line val
+  file="$(config_path)"
+  [ -f "$file" ] || return 0
+  # Match: optional leading space, optional-quoted "spawnterm.<cap>", =, value.
+  line="$(grep -E "^[[:space:]]*\"?spawnterm\.${cap}\"?[[:space:]]*=" "$file" 2>/dev/null | head -1)"
+  [ -n "$line" ] || return 0
+  val="$(printf '%s' "$line" | sed -E 's/^[^=]*=[[:space:]]*([A-Za-z]+).*/\1/')"
+  printf '%s' "$val"
+}
+
+is_enabled() {
+  # $1 = capability name. Returns 0 (ON) / 1 (OFF).
+  [ "$(read_raw "$1")" = "true" ]
+}
+
+canonical_body() {
+  # Writes the full seeded schema to stdout. Reads desired values from the
+  # WANT_<cap> environment set by the caller.
+  local cap var state
+  printf '# spawnterm feature flags\n'
+  printf '# Managed by spawnterm-flag. All flags default OFF when a key is absent.\n'
+  printf '# Docs: spawnterm/docs/feature-flags.md\n'
+  printf '[features]\n'
+  for cap in $KNOWN_FLAGS; do
+    eval "var=\${WANT_${cap}:-false}"
+    if [ "$var" = "true" ]; then state="true"; else state="false"; fi
+    printf '"%s%s" = %s\n' "$PREFIX" "$cap" "$state"
+  done
+}
+
+write_config() {
+  # $1 = capability to change, $2 = true/false. Preserves all other flags.
+  local target="$1" value="$2" cap file dir cur
+  # Snapshot current effective values into WANT_<cap>.
+  for cap in $KNOWN_FLAGS; do
+    if [ "$cap" = "$target" ]; then
+      cur="$value"
+    else
+      cur="$(read_raw "$cap")"
+      [ "$cur" = "true" ] || cur="false"
+    fi
+    eval "WANT_${cap}=\"$cur\""
+  done
+  file="$(config_path)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" || { err "cannot create directory: $dir"; return 1; }
+  canonical_body > "$file" || { err "cannot write config: $file"; return 1; }
+}
+
+cmd_query() {
+  local cap; cap="$(normalize "$1")"
+  is_known "$cap" || err "unknown flag key: $1 (treating as OFF)"
+  if is_enabled "$cap"; then
+    printf '1\n'
+    return 0
+  fi
+  printf '0\n'
+  return 1
+}
+
+cmd_list() {
+  local cap state
+  for cap in $KNOWN_FLAGS; do
+    if is_enabled "$cap"; then state="on"; else state="off"; fi
+    printf '%-30s %s\n' "${PREFIX}${cap}" "$state"
+  done
+}
+
+cmd_set() {
+  # $1 = true/false, $2 = key
+  local value="$1" key="$2" cap
+  cap="$(normalize "$key")"
+  if ! is_known "$cap"; then
+    err "unknown flag key: $key"
+    return 2
+  fi
+  write_config "$cap" "$value"
+}
+
+usage() {
+  cat <<'EOF'
+usage: spawnterm-flag <command|key>
+
+Query a flag (default command):
+  spawnterm-flag <key>          print 1 and exit 0 if ON; print 0 and exit 1 otherwise
+                                (<key> may be given with or without the spawnterm. prefix)
+
+Commands:
+  list                          print every known flag and its effective on/off state
+  enable  <key>                 turn a flag ON  (creates the config + full schema if absent)
+  disable <key>                 turn a flag OFF (creates the config + full schema if absent)
+  path                          print the resolved config file path
+  -h, --help                    show this help
+
+Config: $XDG_CONFIG_HOME/spawnterm/config.toml (falls back to ~/.config/...).
+All flags default OFF. Reads never create a file.
+EOF
+}
+
+main() {
+  if [ "$#" -eq 0 ]; then
+    err "missing command or key"
+    usage >&2
+    return 2
+  fi
+
+  local command="$1"; shift
+  case "$command" in
+    -h|--help|help)
+      usage
+      return 0
+      ;;
+    list)
+      cmd_list
+      return 0
+      ;;
+    path)
+      printf '%s\n' "$(config_path)"
+      return 0
+      ;;
+    enable)
+      if [ "$#" -ne 1 ]; then err "enable requires exactly one <key>"; return 2; fi
+      cmd_set "true" "$1"
+      return $?
+      ;;
+    disable)
+      if [ "$#" -ne 1 ]; then err "disable requires exactly one <key>"; return 2; fi
+      cmd_set "false" "$1"
+      return $?
+      ;;
+    *)
+      if [ "$#" -ne 0 ]; then err "unexpected extra arguments after '$command'"; return 2; fi
+      cmd_query "$command"
+      return $?
+      ;;
+  esac
+}
+
+main "$@"
