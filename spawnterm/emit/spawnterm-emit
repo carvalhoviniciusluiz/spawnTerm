@@ -14,6 +14,12 @@
 #                           ESC ] 9 ; <msg> BEL
 #   mark                 -> ESC ] 1337 ; SetMark BEL
 #   progress <st> <pct>  -> ESC ] 9 ; 4 ; <st> ; <pct> BEL   (ConEmu style)
+#   color <role|status>  -> ESC ] 1337 ; SetColors=tab=<RRGGBB> BEL
+#   badge [format]       -> ESC ] 1337 ; SetBadgeFormat=<base64(format)> BEL
+#
+# The tab-color key is `tab` (verified against iTerm2's it2setcolor utility and
+# the SetColors parser); iTerm2 has no `tabbg` key. The lifecycle palette is
+# colorblind-safe (Okabe-Ito); see spawnterm/emit/docs/colors.md.
 #
 # Gating: every capability gates on its feature flag. This one gates on
 # `spawnterm.status_board` via the external `spawnterm-flag` helper (#11).
@@ -29,6 +35,9 @@ set -eu
 PROG="spawnterm-emit"
 FLAG_KEY="spawnterm.status_board"
 DEFAULT_ATTENTION_MSG="spawnterm: agent needs attention"
+# Default badge interpolates the user vars set by `role`/`task` (iTerm2 exposes
+# SetUserVar=agent.<k> as user.agent.<k>). Middle dot separates role and task.
+DEFAULT_BADGE_FORMAT='\(user.agent.role) · \(user.agent.task)'
 
 usage() {
 	cat <<EOF
@@ -46,6 +55,11 @@ Commands:
   mark                    Emit SetMark.
   progress <state> <pct>  ConEmu progress. state in {0,1,2,3,4}, pct in 0..100.
                           0=remove 1=normal 2=error 3=indeterminate 4=paused
+  color <role-or-status>  Set the tab color (SetColors=tab). Accepts a lifecycle
+                          status (busy, blocked, done, idle) mapped to a
+                          colorblind-safe hex, or a raw RGB/RRGGBB hex.
+  badge [format]          Set the session badge (SetBadgeFormat, base64'd).
+                          Default: $DEFAULT_BADGE_FORMAT
 
 Options:
   --no-gate               Bypass the feature-flag gate (local testing).
@@ -100,6 +114,30 @@ is_uint() {
 	case "$1" in
 		'' | *[!0-9]*) return 1 ;;
 		*) return 0 ;;
+	esac
+}
+
+is_hex() {
+	# True for a 3- or 6-digit hex color (case-insensitive), no leading '#'.
+	case "$1" in
+		[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+		[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Map a lifecycle status (or role) to a colorblind-safe hex (Okabe-Ito), or
+# pass a raw hex through. Echoes RRGGBB on success; returns 1 for unknown input.
+# Palette rationale + exact bytes: spawnterm/emit/docs/colors.md.
+color_for() {
+	case "$1" in
+		busy)    printf '0072B2' ;;
+		blocked) printf 'E69F00' ;;
+		done)    printf '009E73' ;;
+		idle)    printf '999999' ;;
+		*)
+			if is_hex "$1"; then printf '%s' "$1"; else return 1; fi
+			;;
 	esac
 }
 
@@ -167,6 +205,19 @@ case "$cmd" in
 		is_uint "$pct" || die "progress pct must be an integer 0..100 (got: $pct)"
 		[ "$pct" -ge 0 ] && [ "$pct" -le 100 ] || die "progress pct must be 0..100 (got: $pct)"
 		seq="$(osc "9;4;$state;$pct")"
+		;;
+	color)
+		[ $# -eq 1 ] || die "color requires exactly one <role-or-status> argument"
+		hex="$(color_for "$1")" || die "unknown status/role: $1 (known: busy, blocked, done, idle; or pass a RGB/RRGGBB hex)"
+		seq="$(osc "1337;SetColors=tab=$hex")"
+		;;
+	badge)
+		if [ $# -ge 1 ]; then
+			fmt="$*"
+		else
+			fmt="$DEFAULT_BADGE_FORMAT"
+		fi
+		seq="$(osc "1337;SetBadgeFormat=$(b64 "$fmt")")"
 		;;
 	*)
 		die "unknown command: $cmd (try --help)"

@@ -1,8 +1,9 @@
 # spawnterm/emit
 
-Tier 0.1 (#7) — escape-code emitter. Agents call this to signal their own state
-by writing iTerm2 proprietary escape codes to their own stdout. `scope:external-tooling`
-— runs *on* iTerm2's escape codes; does not modify iTerm2 source.
+Tier 0.1 (#7) / Tier 0.2 (#8) — escape-code emitter. Agents call this to signal
+their own state by writing iTerm2 proprietary escape codes to their own stdout.
+`scope:external-tooling` — runs *on* iTerm2's escape codes; does not modify
+iTerm2 source.
 
 Two byte-for-byte-identical implementations are provided so agents can use
 whichever is convenient:
@@ -24,11 +25,21 @@ spawnterm-emit [--no-gate] <command> [args]
 | `attention [message]` | `ESC ] 1337 ; RequestAttention=yes BEL` then `ESC ] 9 ; <message> BEL` |
 | `mark` | `ESC ] 1337 ; SetMark BEL` |
 | `progress <state> <pct>` | `ESC ] 9 ; 4 ; <state> ; <pct> BEL` (ConEmu style) |
+| `color <role-or-status>` | `ESC ] 1337 ; SetColors=tab=<RRGGBB> BEL` |
+| `badge [format]` | `ESC ] 1337 ; SetBadgeFormat=<base64(format)> BEL` |
 
 `SetUserVar` values are base64-encoded because iTerm2 requires it. `progress`
 `state` is one of `0` (remove), `1` (normal), `2` (error), `3` (indeterminate),
 `4` (paused); `pct` is an integer `0..100`. The default `attention` message is
 `spawnterm: agent needs attention`.
+
+`color` sets the **tab** color (key `tab`; iTerm2 has no `tabbg` key). It accepts
+a lifecycle status — `busy`, `blocked`, `done`, `idle` — mapped to a
+colorblind-safe (Okabe-Ito) hex, or a raw `RGB`/`RRGGBB` hex for other roles.
+`badge` sets the session badge; iTerm2 requires the format base64-encoded, and
+the default `\(user.agent.role) · \(user.agent.task)` interpolates the user vars
+set by `role`/`task`. The full palette, colorblind rationale, and exact byte
+sequences are in [`docs/colors.md`](docs/colors.md).
 
 The **only** thing written to stdout is the escape sequence itself. Nothing is
 logged; values that iTerm2 requires base64 for are base64'd.
