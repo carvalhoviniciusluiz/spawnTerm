@@ -60,6 +60,17 @@ durable log. Each capability **gates on its feature-flag** (`spawnterm.<key>`, d
 **Phase 4 — Upstream:**
 7. **#6 Tier 4 core PRs** — only after real usage evidence from #3/#4.
 
+## Operator decision (2026-07-22) — fork is the product
+spawnTerm is a **personal-use AI-agent terminal**, a fork of iTerm2 for the agent-orchestration
+support iTerm2 lacks. **It will NOT be submitted to `gnachman/iTerm2`.** Therefore the
+`scope:iterm2-core` items (#12 settings pane, #6 Tier 4) are built **directly in this fork** —
+no upstream discussion, no upstream PR. `scope:iterm2-core` now just means "edits iTerm2 source,
+built + tested here." Core changes are verified by compiling (`tools/build.sh`, `ModernTests` via
+`tools/run_tests.expect`); the full-app run is the operator's test phase. Follow `CLAUDE.md` strictly
+for any iTerm2 source (it_fatalError, external template loader for JS/HTML/CSS, `add_file_to_xcodeproj.rb`,
+`build_proto.sh` after proto edits, warnings-as-errors, update `docs/notes-3.7.txt`). The upstream
+draft proposals under `docs/upstream/` are kept only as a design record.
+
 ## Progress (live)
 **All external-tooling tiers (0–3) + every capability are DONE ✅ and merged. 614 unit tests green on `master` (all pure / iTerm2-free).**
 - **Tier 0 (#2) ✅**: #11 feature-flags · #7 emit · #8 colors/badge · #9 triggers · #10 spawn wrapper. Hotfix #23: user-var keys are **dot-free** (`agent_status`, not `agent.status`; iTerm2 rejects `.`).
