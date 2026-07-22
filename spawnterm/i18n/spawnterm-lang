@@ -90,6 +90,25 @@ active_language() {
   printf 'en\n'
 }
 
+configured_language() {
+  # Echo the RAW stored [settings] language value (en/pt-BR/system), or the
+  # default when absent/invalid. Unlike active_language this does NOT resolve
+  # the "system" pseudo-language: it reports exactly what is persisted so a UI
+  # can round-trip the user's literal choice. Mirrors the i18n twin's helper.
+  local file line val
+  file="$(config_path)"
+  if [ -f "$file" ]; then
+    line="$(grep -E '^[[:space:]]*language[[:space:]]*=' "$file" 2>/dev/null | head -1)"
+    if [ -n "$line" ]; then
+      val="$(printf '%s' "$line" | sed -E 's/^[^=]*=[[:space:]]*"?([A-Za-z-]+)"?.*/\1/')"
+      case "$val" in
+        en|pt-BR|system) printf '%s' "$val"; return ;;
+      esac
+    fi
+  fi
+  printf 'en'
+}
+
 list_languages() {
   local f base
   for f in "$SD"/*.json; do
@@ -105,12 +124,13 @@ usage: $PROG <command> [lang]
 
 Commands:
   get                  print the resolved active language (en or pt-BR)
+  current              print the RAW stored language (en/pt-BR/system)
   set <en|pt-BR|system>  set [settings] language (preserves [features])
   list                 print the available languages (catalogs found)
   -h, --help           show this help
 
 Config: \$XDG_CONFIG_HOME/spawnterm/config.toml (falls back to ~/.config/...).
-Default language is en. get/list never create a file.
+Default language is en. get/current/list never create a file.
 EOF
 }
 
@@ -136,6 +156,11 @@ main() {
       ;;
     get)
       active_language
+      return 0
+      ;;
+    current)
+      configured_language
+      printf '\n'
       return 0
       ;;
     list)

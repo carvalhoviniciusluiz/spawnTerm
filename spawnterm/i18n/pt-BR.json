@@ -31,5 +31,7 @@
   "help.intro": "Imprime o guia de capacidades e, em seguida, uma lista ao vivo dos feature flags atualmente ativados.",
   "help.enabled_section": "Atualmente ativados (ao vivo)",
   "help.no_flags": "Nenhum feature flag está ativado (todos são OFF por padrão).",
-  "gate.off": "spawnterm.{0} está desativado. Ative com: spawnterm-flag enable spawnterm.{0}"
+  "gate.off": "spawnterm.{0} está desativado. Ative com: spawnterm-flag enable spawnterm.{0}",
+  "settings.language.label": "Idioma",
+  "settings.language.system": "Sistema"
 }
