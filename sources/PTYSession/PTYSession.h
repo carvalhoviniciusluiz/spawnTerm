@@ -901,7 +901,10 @@ webViewConfiguration:(nullable WKWebViewConfiguration *)webViewConfiguration
 // reach PTYTask. For text routed elsewhere (tmux client, conductor keystrokes,
 // broadcast fan-out) it fires once the text has been handed to that route. This
 // does NOT guarantee the bytes reached the kernel PTY. `completion` may be nil.
-- (void)writeTask:(NSString *)string completion:(void (^)(void))completion;
+// NS_SWIFT_DISABLE_ASYNC: do not auto-generate a Swift `async` overload — it
+// would shadow the synchronous writeTask:/writeTaskNoBroadcast: calls in async
+// Swift contexts (e.g. sources/ClaudeCode/Orchestration), which must stay sync.
+- (void)writeTask:(NSString *)string completion:(void (^)(void))completion NS_SWIFT_DISABLE_ASYNC;
 
 - (void)enterUsername:(NSString *)username;
 
@@ -911,7 +914,7 @@ webViewConfiguration:(nullable WKWebViewConfiguration *)webViewConfiguration
 // Like writeTaskNoBroadcast: but invokes `completion` (on the main queue) once
 // the text has been handed off to the session's write pipeline. See
 // writeTask:completion: for the exact dispatch guarantee. `completion` may be nil.
-- (void)writeTaskNoBroadcast:(NSString *)string completion:(void (^)(void))completion;
+- (void)writeTaskNoBroadcast:(NSString *)string completion:(void (^)(void))completion NS_SWIFT_DISABLE_ASYNC;
 
 // Write with a particular encoding. If the encoding is just session.terminal.encoding then pass
 // NO for `forceEncoding` and the terminal's encoding will be used instead of `optionalEncoding`.
