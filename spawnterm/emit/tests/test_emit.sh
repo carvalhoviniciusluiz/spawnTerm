@@ -89,7 +89,7 @@ parity "color-idle"        color idle
 parity "color-rawhex"      color a1b2c3
 parity "color-rgbshort"    color fff
 parity "badge-default"     badge
-parity "badge-custom"      badge '\(user.agent.role): \(user.agent.status)'
+parity "badge-custom"      badge '\(user.agent_role): \(user.agent_status)'
 
 echo
 echo "--- 1b. color palette + badge base64 correctness ---"
@@ -111,7 +111,7 @@ check_color idle    999999
 # The badge payload must be base64 that decodes back to the exact format string.
 badge_b64="$(SPAWNTERM_FORCE=1 sh "$SH" badge | sed -e 's/.*SetBadgeFormat=//' -e 's/'"$(printf '\007')"'$//')"
 badge_decoded="$(printf '%s' "$badge_b64" | base64 --decode 2>/dev/null || printf '%s' "$badge_b64" | base64 -D)"
-want_badge='\(user.agent.role) · \(user.agent.task)'
+want_badge='\(user.agent_role) · \(user.agent_task)'
 if [ "$badge_decoded" = "$want_badge" ]; then
 	green "badge base64 round-trips to the default format"
 else

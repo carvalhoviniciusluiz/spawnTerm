@@ -77,30 +77,31 @@ ESC ] 1337 ; SetBadgeFormat=<base64(format)> BEL
 
 iTerm2 requires the badge format to be **base64-encoded** in the escape code.
 The format string may interpolate iTerm2 variables with `\(…)`. Because the
-`role` and `task` subcommands set the user vars `agent.role` / `agent.task` (via
-`SetUserVar`, which iTerm2 exposes under the `user.` namespace), the default
+`role` and `task` subcommands set the user vars `agent_role` / `agent_task` (via
+`SetUserVar`, which iTerm2 exposes under the `user.` namespace — note iTerm2
+forbids `.` in a SetUserVar key, so the names are underscored), the default
 badge shows role and task:
 
 ```
-\(user.agent.role) · \(user.agent.task)
+\(user.agent_role) · \(user.agent_task)
 ```
 
 That default base64-encodes to
-`XCh1c2VyLmFnZW50LnJvbGUpIMK3IFwodXNlci5hZ2VudC50YXNrKQ==`, so:
+`XCh1c2VyLmFnZW50X3JvbGUpIMK3IFwodXNlci5hZ2VudF90YXNrKQ==`, so:
 
 ```
-badge  ->  ESC ] 1337 ; SetBadgeFormat=XCh1c2VyLmFnZW50LnJvbGUpIMK3IFwodXNlci5hZ2VudC50YXNrKQ== BEL
+badge  ->  ESC ] 1337 ; SetBadgeFormat=XCh1c2VyLmFnZW50X3JvbGUpIMK3IFwodXNlci5hZ2VudF90YXNrKQ== BEL
 ```
 
 Hex bytes (from `od`):
 
 ```
 1b 5d 31 33 33 37 3b 53 65 74 42 61 64 67 65 46 6f 72 6d 61 74 3d 58 43 68 31
-63 32 56 79 4c 6d 46 6e 5a 57 35 30 4c 6e 4a 76 62 47 55 70 49 4d 4b 33 49 46
-77 6f 64 58 4e 6c 63 69 35 68 5a 32 56 75 64 43 35 30 59 58 4e 72 4b 51 3d 3d 07
+63 32 56 79 4c 6d 46 6e 5a 57 35 30 58 33 4a 76 62 47 55 70 49 4d 4b 33 49 46
+77 6f 64 58 4e 6c 63 69 35 68 5a 32 56 75 64 46 39 30 59 58 4e 72 4b 51 3d 3d 07
 ```
 
-Pass any other format to override (`badge '\(user.agent.role): \(user.agent.status)'`).
+Pass any other format to override (`badge '\(user.agent_role): \(user.agent_status)'`).
 The separator in the default is a middle dot `·` (U+00B7), encoded as the UTF-8
 bytes `C2 B7`; both implementations base64 the same UTF-8 bytes.
 
