@@ -1,0 +1,97 @@
+#!/usr/bin/env sh
+# spawnterm-help — print the single-source-of-truth AGENT_GUIDE.md, then append a
+# live "Currently enabled" section built from `spawnterm-flag list`.
+#
+# spawnTerm capability guide surface (#56). scope:external-tooling — this only
+# reads a doc and shells out to spawnterm-flag; it never modifies iTerm2 source
+# and re-implements nothing.
+#
+# The guide is NOT duplicated here: we resolve AGENT_GUIDE.md relative to this
+# script and print it verbatim, so there is one source of truth and no drift.
+#
+# This surface is NEVER gated — help must always work, even when every
+# capability flag is OFF. The flags section is best-effort: if `spawnterm-flag`
+# cannot be found we simply omit it and still print the guide.
+set -u
+
+PROG="spawnterm-help"
+
+usage() {
+	cat <<EOF
+$PROG — print the spawnTerm agent capability guide (AGENT_GUIDE.md) plus a live
+list of currently enabled feature flags.
+
+Usage:
+  $PROG            Print the guide, then the "Currently enabled" flag section.
+  $PROG -h|--help  Show this help.
+
+Not gated: help always works. The guide is read from AGENT_GUIDE.md (single
+source of truth); nothing is duplicated here.
+EOF
+}
+
+case "${1:-}" in
+	-h|--help)
+		usage
+		exit 0
+		;;
+	"")
+		: # fall through to print the guide
+		;;
+	*)
+		printf '%s: unexpected argument: %s\n' "$PROG" "$1" >&2
+		usage >&2
+		exit 2
+		;;
+esac
+
+# --- resolve this script's directory (absolute) ------------------------------
+script_dir() {
+	d="$(dirname "$0")"
+	(cd "$d" 2>/dev/null && pwd)
+}
+
+SD="$(script_dir)"
+if [ -z "$SD" ]; then
+	printf '%s: cannot resolve script directory\n' "$PROG" >&2
+	exit 1
+fi
+
+# --- locate AGENT_GUIDE.md (sibling of this script) --------------------------
+GUIDE="$SD/AGENT_GUIDE.md"
+if [ ! -f "$GUIDE" ]; then
+	printf '%s: guide not found: %s\n' "$PROG" "$GUIDE" >&2
+	exit 1
+fi
+
+# --- print the guide verbatim (single source of truth) -----------------------
+cat "$GUIDE"
+
+# --- locate spawnterm-flag (sibling flags/ dir, else PATH) -------------------
+find_flag() {
+	if [ -x "$SD/flags/spawnterm-flag" ]; then
+		printf '%s/flags/spawnterm-flag' "$SD"
+		return 0
+	fi
+	if command -v spawnterm-flag >/dev/null 2>&1; then
+		command -v spawnterm-flag
+		return 0
+	fi
+	return 1
+}
+
+# --- append the live "Currently enabled" section (best-effort) ---------------
+printf '\n\n## Currently enabled (live)\n\n'
+if FLAG="$(find_flag)"; then
+	# `spawnterm-flag list` prints one "spawnterm.<key> <on|off>" line per flag.
+	on_lines="$("$FLAG" list 2>/dev/null | grep ' on$')"
+	if [ -n "$on_lines" ]; then
+		printf 'Enabled feature flags:\n\n'
+		printf '%s\n' "$on_lines" | sed 's/^/  /'
+	else
+		printf 'No feature flags are enabled (all default OFF).\n'
+		printf 'Enable one with: spawnterm-flag enable spawnterm.<key>\n'
+	fi
+else
+	printf '(spawnterm-flag not found — cannot show live flag state.)\n'
+fi

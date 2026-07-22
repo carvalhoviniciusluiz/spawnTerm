@@ -220,11 +220,32 @@ class TestListAgents(unittest.TestCase):
         )
 
 
+class TestHelp(unittest.TestCase):
+    def test_returns_guide_text(self):
+        # The help tool needs no broker/spawn; it reads AGENT_GUIDE.md.
+        result = tools.call_tool("help", {}, make_deps())
+        self.assertTrue(result["ok"])
+        self.assertIn("guide", result)
+        self.assertGreater(len(result["guide"]), 0)
+        # It is the real guide (a title + the "everything is a flag" contract).
+        self.assertIn("spawnTerm", result["guide"])
+        self.assertIn("spawnterm-flag", result["guide"])
+
+    def test_reads_the_single_source_file(self):
+        # No duplication: the returned text is byte-for-byte AGENT_GUIDE.md.
+        result = tools.call_tool("help", {}, make_deps())
+        self.assertEqual(result["guide"], tools.GUIDE_PATH.read_text(encoding="utf-8"))
+
+    def test_ignores_arguments(self):
+        result = tools.call_tool("help", {"unexpected": 1}, make_deps())
+        self.assertTrue(result["ok"])
+
+
 class TestRegistry(unittest.TestCase):
-    def test_all_six_tools_present(self):
+    def test_all_tools_present(self):
         self.assertEqual(
             set(tools.TOOLS),
-            {"spawn", "assign", "handoff", "send_message", "status", "list_agents"},
+            {"spawn", "assign", "handoff", "send_message", "status", "list_agents", "help"},
         )
 
     def test_descriptors_have_valid_schemas(self):

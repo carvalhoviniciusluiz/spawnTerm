@@ -16,6 +16,8 @@ Implemented methods (the minimal correct subset an MCP client needs):
                           (``content`` text block + ``structuredContent``;
                           ``isError`` reflects the handler's ``ok`` flag, or a
                           raised exception such as an unreachable broker).
+  * ``resources/list``  → the one guide resource (AGENT_GUIDE.md).
+  * ``resources/read``  → the guide's text for its URI (#56 single source).
   * notifications (no ``id``, e.g. ``notifications/initialized``) → no response.
 
 Everything else is a proper JSON-RPC error (``-32601`` method not found,
@@ -77,18 +79,66 @@ def _tool_result(payload: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+# A one-line pointer surfaced in the initialize handshake so a connecting agent
+# immediately knows the guide exists (without duplicating it — the text lives in
+# AGENT_GUIDE.md, reachable via the ``help`` tool or the guide resource).
+INSTRUCTIONS = (
+    "spawnTerm orchestration tools. Every capability is a feature flag, default "
+    "OFF. Call the 'help' tool (or read the '"
+    + tools.GUIDE_URI
+    + "' resource) for the full capability guide: flags, commands, and examples."
+)
+
+
 def _handle_initialize(params: dict) -> dict:
-    """MCP handshake: advertise tool capability + server info.
+    """MCP handshake: advertise tool + resource capability, server info, guide.
 
     Echoes the client's ``protocolVersion`` when it supplies a string one (keeps
-    strict clients happy), otherwise advertises :data:`PROTOCOL_VERSION`.
+    strict clients happy), otherwise advertises :data:`PROTOCOL_VERSION`. Also
+    advertises the ``resources`` capability and includes an ``instructions``
+    string pointing at the capability guide (#56) — both read the one
+    ``AGENT_GUIDE.md`` and never duplicate it.
     """
     requested = params.get("protocolVersion") if isinstance(params, dict) else None
     version = requested if isinstance(requested, str) and requested else PROTOCOL_VERSION
     return {
         "protocolVersion": version,
-        "capabilities": {"tools": {"listChanged": False}},
+        "capabilities": {
+            "tools": {"listChanged": False},
+            "resources": {"listChanged": False},
+        },
         "serverInfo": SERVER_INFO,
+        "instructions": INSTRUCTIONS,
+    }
+
+
+# The one resource we expose: the capability guide, read from AGENT_GUIDE.md.
+GUIDE_RESOURCE = {
+    "uri": tools.GUIDE_URI,
+    "name": "spawnTerm agent capability guide",
+    "description": "AGENT_GUIDE.md — the single source of truth for every "
+    "spawnTerm capability, its feature flag, command/MCP tool, and example.",
+    "mimeType": "text/markdown",
+}
+
+
+def _handle_resources_read(params: dict) -> dict:
+    """Serve ``resources/read`` for the guide URI (reads AGENT_GUIDE.md).
+
+    Any other URI is reported as an empty contents list (unknown resource); a
+    missing guide file surfaces as an empty read rather than a crash.
+    """
+    uri = params.get("uri") if isinstance(params, dict) else None
+    if uri != tools.GUIDE_URI:
+        return {"contents": []}
+    try:
+        text = tools.read_guide()
+    except OSError:
+        return {"contents": []}
+    return {
+        "contents": [
+            {"uri": tools.GUIDE_URI, "mimeType": "text/markdown", "text": text}
+        ]
     }
 
 
@@ -149,6 +199,10 @@ def handle_request(request: Any, deps: Deps) -> Optional[dict]:
         return _result(req_id, {"tools": tools.tool_descriptors()})
     if method == "tools/call":
         return _result(req_id, _handle_tools_call(params, deps))
+    if method == "resources/list":
+        return _result(req_id, {"resources": [GUIDE_RESOURCE]})
+    if method == "resources/read":
+        return _result(req_id, _handle_resources_read(params))
     if method == "ping":
         # MCP utility ping: empty result.
         return _result(req_id, {})

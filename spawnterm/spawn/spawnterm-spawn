@@ -133,6 +133,11 @@ Worktree + port/namespace isolation (issue #13 — gated OFF by default):
   \$SPAWNTERM_BRANCH before the command runs. When OFF, spawn behaves exactly
   as #10 (plain cwd inheritance, no worktree, no port). See WORKTREE.md.
 
+Capability guide:
+  (default)        Inject a 1-line header into the new session pointing at the
+                   spawnTerm capability guide (run: spawnterm help).
+  --no-guide       Do not inject the guide header.
+
 Other:
   --no-gate        Forward --no-gate to every emit call AND bypass the
                    worktree-isolation gate (local testing).
@@ -170,6 +175,7 @@ AGENT_ID=""
 BASE_PORT=""
 NO_PROBE=0
 NO_GATE=0
+NO_GUIDE=0
 DRYRUN="${SPAWNTERM_SPAWN_DRYRUN:-0}"
 [ "$DRYRUN" = "1" ] || DRYRUN=0
 
@@ -216,6 +222,8 @@ while [ $# -gt 0 ]; do
 			NO_PROBE=1; shift ;;
 		--no-gate)
 			NO_GATE=1; shift ;;
+		--no-guide)
+			NO_GUIDE=1; shift ;;
 		--dry-run)
 			DRYRUN=1; shift ;;
 		-h|--help)
@@ -378,14 +386,26 @@ add_emit "status $(shq "$STATUS")"
 add_emit "color $(shq "$STATUS")"
 add_emit "badge"
 
-# 3) the user command was captured into RUN_CMD above (before the isolation
+# 3) capability-guide header (#56). A SHORT (1-line) pointer to the consolidated
+#    guide is printed into the new session AFTER the identity emits, so a fresh
+#    agent learns the capabilities exist. It does NOT dump the guide — it points
+#    at `spawnterm help`. Suppressed with --no-guide. Not gated (a hint, not a
+#    capability). We echo it via printf so it appears in the session's scrollback.
+GUIDE_CMD=""
+if [ "$NO_GUIDE" != "1" ]; then
+	GUIDE_LINE="# spawnTerm capabilities available — run: spawnterm help"
+	GUIDE_CMD="printf '%s\n' $(shq "$GUIDE_LINE")
+"
+fi
+
+# 4) the user command was captured into RUN_CMD above (before the isolation
 #    block, which uses `set --`).
 
 # The full script written into the new session, one command per line. When
 # isolation is ON the per-agent env exports go right after the cd, so they are
 # in scope for both the identity emits and the agent command.
 SESSION_SCRIPT="$CD_CMD
-${ISOLATION_EXPORTS}${EMIT_CMDS}${RUN_CMD}"
+${ISOLATION_EXPORTS}${EMIT_CMDS}${GUIDE_CMD}${RUN_CMD}"
 
 # --- assemble the AppleScript -------------------------------------------------
 # iTerm2 scripting model: create a tab in the current window (or a new window if
@@ -417,6 +437,7 @@ if [ "$DRYRUN" = "1" ]; then
 	printf '  emit helper  : %s\n' "$EMIT"
 	printf '  gate bypass  : %s\n' "$([ "$NO_GATE" = 1 ] && echo 'yes (--no-gate forwarded)' || echo 'no (emit self-gates on spawnterm.status_board)')"
 	printf '  isolation    : %s\n' "$([ "$ISOLATION_ON" = 1 ] && echo 'ON (spawnterm.worktree_isolation) — per-agent worktree + port' || echo 'off (plain $PWD inheritance, = #10)')"
+	printf '  guide header : %s\n' "$([ "$NO_GUIDE" = 1 ] && echo 'off (--no-guide)' || echo 'on (run: spawnterm help)')"
 	if [ "$ISOLATION_ON" = "1" ]; then
 		printf '\n  worktree isolation plan (from spawnterm-worktree):\n'
 		printf '%s\n' "$ISOLATION_PLAN" | sed 's/^/    /'

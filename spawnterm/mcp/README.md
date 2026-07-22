@@ -61,6 +61,12 @@ Each tool maps to exactly one Tier 1 spawn plan or Tier 2 broker op:
 | `send_message` | broker `send` | durable, acknowledged message to another agent |
 | `status` | broker `handoff_get` | latest handoff/state for an agent |
 | `list_agents` | broker `query` | list registry agents (role/alive/capability filters) |
+| `help` | reads `../AGENT_GUIDE.md` | return the consolidated capability guide (#56); no broker/spawn dependency |
+
+The guide (`spawnterm/AGENT_GUIDE.md`) is the single source of truth; the `help`
+tool returns its text without duplicating it. It is also exposed as an MCP
+resource (`resources/list` + `resources/read` at `spawnterm://guide`) and pointed
+at by the `instructions` field in the `initialize` handshake.
 
 A `tools/call` returns a standard MCP result: a `content` text block with the
 JSON payload, a `structuredContent` copy for machine use, and `isError`
@@ -115,10 +121,12 @@ A minimal, correct JSON-RPC 2.0 subset implemented with the stdlib only (`json`,
 `sys`) — **no pip dependency**, consistent with the rest of the repo. One request
 per line on stdin, one response line per non-notification on stdout. Implemented:
 
-- `initialize` — handshake; advertises `tools` capability + `serverInfo`
-  (echoes the client's `protocolVersion`, else `2024-11-05`).
-- `tools/list` — the six tool descriptors with their JSON schemas.
+- `initialize` — handshake; advertises `tools` + `resources` capability +
+  `serverInfo` + an `instructions` pointer to the guide (echoes the client's
+  `protocolVersion`, else `2024-11-05`).
+- `tools/list` — the seven tool descriptors with their JSON schemas.
 - `tools/call` — dispatch to a handler; result wrapped as an MCP tool result.
+- `resources/list` / `resources/read` — the one guide resource (`AGENT_GUIDE.md`).
 - `ping` — utility ping (empty result).
 - notifications (no `id`, e.g. `notifications/initialized`) — accepted, no reply.
 
@@ -178,7 +186,8 @@ bash spawnterm/mcp/tests/run_tests.sh
 ```
 
 Pure Python, stdlib only — no services, no sockets, no sleeps, no network.
-Covers the six handlers (arguments → broker/spawn op, via a mock broker + mock
-launcher), the JSON-RPC/MCP dispatch (initialize, `tools/list` schemas,
-`tools/call`, malformed → JSON-RPC error, notifications), the `spawnterm.mcp`
+Covers the seven handlers (arguments → broker/spawn op, via a mock broker + mock
+launcher; the `help` tool returns the guide text), the JSON-RPC/MCP dispatch
+(initialize, `tools/list` schemas, `tools/call`, `resources/list` +
+`resources/read`, malformed → JSON-RPC error, notifications), the `spawnterm.mcp`
 gate + purity, and a framed stdio round-trip.
