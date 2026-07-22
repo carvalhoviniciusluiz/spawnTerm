@@ -1,0 +1,628 @@
+#!/usr/bin/env sh
+# it2agent-review — per-agent diff/review surface for it2agent.
+#
+# it2agent Phase 2 (#14). scope:external-tooling — glue that shells out to
+# `git`, the #13 worktree allocator, the #11 flag helper, the #34/#35 broker
+# (for request-changes), and osascript (for the optional iTerm2 pane). It never
+# modifies iTerm2 source.
+#
+# THE REVIEW BOTTLENECK. Human review is the throughput ceiling; parallel agents
+# multiply review debt. This tool gives a reviewer ONE command per agent to (1)
+# see that agent's worktree diff vs base, (2) approve→merge it when safe, or (3)
+# request changes with a note routed back to the agent.
+#
+# ---------------------------------------------------------------------------
+# RESOLUTION (pure, reuses #13) — subcommand `resolve`
+# ---------------------------------------------------------------------------
+# Given an agent id (+ optional role), we reuse the #13 allocator
+# (`it2agent-worktree plan`) to derive the SAME branch + worktree path that
+# agent was spawned on, so `it2agent-review show <id> --role <role>` finds the
+# right worktree with no extra bookkeeping. An explicit --branch/--worktree
+# overrides the derivation. The base is detected exactly like #13's cleanup:
+# origin/HEAD -> local main -> local master -> current branch (override --base).
+#
+# ---------------------------------------------------------------------------
+# ACTIONS (side-effecting, all --dry-run-able, all gated on agent.review)
+# ---------------------------------------------------------------------------
+#   show             Render the agent's diff vs base: a `--stat` summary plus the
+#                    full patch of `git diff <base>...<branch>` (three-dot: the
+#                    changes the branch introduced since it forked base). Uses
+#                    `delta` if installed, else git's pager on a TTY, else plain.
+#   approve          Merge the branch into base ONLY IF SAFE (reusing #13's
+#                    safety spirit): refuse a DIRTY agent worktree, refuse a
+#                    conflicting merge, refuse a dirty main checkout. Default
+#                    --no-ff (an auditable merge commit); --ff-only to fast-fwd.
+#                    Restores the previously checked-out branch afterward. With
+#                    --cleanup, invokes #13's `it2agent-worktree cleanup`.
+#   request-changes  Capture a short note and route it to the agent: the broker
+#                    mailbox (#34/#35 `send` op) when reachable, else a fallback
+#                    note file written into the agent's worktree (+ printed).
+#   pane             (optional) Open the review `show` in a dedicated iTerm2
+#                    split pane next to the agent, via osascript (like #10).
+#
+# --dry-run prints exactly the git / broker / osascript commands it WOULD run
+# (as `would-run: ...` lines) plus the resolved target, and executes nothing.
+#
+# Gating: the ACTIONS self-gate on `agent.review` via `it2agent-flag`
+# (fail-safe: flag absent / helper missing => OFF => no-op, exit 0), bypassable
+# with --no-gate or IT2AGENT_FORCE=1 (matching it2agent-emit / -spawn /
+# -worktree). `resolve` is pure and never gates.
+#
+# No external deps beyond `git`; optional `delta`, `osascript`, `python3` (for
+# the broker leg), and the sibling `it2agent-worktree` / `it2agent-flag`.
+set -eu
+
+PROG="it2agent-review"
+FLAG_KEY="agent.review"
+
+die() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	exit 2
+}
+
+warn() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+}
+
+# --- locate siblings (absolute) ----------------------------------------------
+script_dir() {
+	d="$(dirname "$0")"
+	(cd "$d" 2>/dev/null && pwd)
+}
+
+find_worktree_helper() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/../spawn/it2agent-worktree" ]; then
+		wd="$(cd "$sd/../spawn" && pwd)"
+		printf '%s/it2agent-worktree' "$wd"
+		return 0
+	fi
+	if command -v it2agent-worktree >/dev/null 2>&1; then
+		command -v it2agent-worktree
+		return 0
+	fi
+	return 1
+}
+
+find_flag() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/../flags/it2agent-flag" ]; then
+		fd="$(cd "$sd/../flags" && pwd)"
+		printf '%s/it2agent-flag' "$fd"
+		return 0
+	fi
+	if command -v it2agent-flag >/dev/null 2>&1; then
+		command -v it2agent-flag
+		return 0
+	fi
+	return 1
+}
+
+find_notify() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -f "$sd/review_notify.py" ]; then
+		printf '%s/review_notify.py' "$sd"
+		return 0
+	fi
+	return 1
+}
+
+# gate_open: 0 (ON / bypassed) or 1 (OFF). Fail-safe OFF when the flag helper is
+# missing or the flag is not set true.
+gate_open() {
+	[ "${IT2AGENT_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	flag="$(find_flag 2>/dev/null)" || return 1
+	if "$flag" "$FLAG_KEY" >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+# --- pure helpers ------------------------------------------------------------
+canon_dir() {
+	(cd "$1" 2>/dev/null && pwd -P)
+}
+
+resolve_repo() {
+	base="${1:-$PWD}"
+	[ -d "$base" ] || die "not a directory: $base"
+	top="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" \
+		|| die "not inside a git repository: $base"
+	REPO_ROOT="$(canon_dir "$top")"
+}
+
+# detect_base: default merge target. Prefer remote HEAD, then local main/master,
+# then the repo's current branch. Consistent with it2agent-worktree cleanup.
+detect_base() {
+	b="$(git -C "$REPO_ROOT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+	if [ -n "$b" ] && git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$b"; then
+		printf '%s' "$b"; return 0
+	fi
+	for cand in main master; do
+		if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$cand"; then
+			printf '%s' "$cand"; return 0
+		fi
+	done
+	git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null
+}
+
+# val KEY TEXT -> value of a `KEY=...` line (used to parse the #13 plan output).
+val() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -1; }
+
+# resolve_target: sets BRANCH, WORKTREE, BASE from the CLI inputs, reusing the
+# #13 allocator to derive branch/worktree from an agent id+role unless the
+# caller gave --branch/--worktree explicitly. Pure (plan is pure, no gate).
+resolve_target() {
+	if [ -n "$BRANCH_ARG" ]; then
+		BRANCH="$BRANCH_ARG"
+	fi
+	if [ -n "$WORKTREE_ARG" ]; then
+		WORKTREE="$(canon_dir "$WORKTREE_ARG" 2>/dev/null || printf '%s' "$WORKTREE_ARG")"
+	fi
+
+	if [ -z "${BRANCH:-}" ] || [ -z "${WORKTREE:-}" ]; then
+		# Need the allocator to fill in whichever piece was not given explicitly.
+		[ -n "$AGENT_ID" ] || die "specify an agent id (to reuse the #13 allocator) or pass both --branch and --worktree"
+		wt_helper="$(find_worktree_helper)" || die "cannot find it2agent-worktree (needed to resolve the agent's branch/worktree)"
+		set -- plan --repo "$REPO_ROOT" --id "$AGENT_ID"
+		[ -n "$ROLE" ] && set -- "$@" --role "$ROLE"
+		plan_out="$(sh "$wt_helper" "$@")" || die "it2agent-worktree plan failed for id '$AGENT_ID'"
+		[ -n "${BRANCH:-}" ] || BRANCH="$(val branch "$plan_out")"
+		[ -n "${WORKTREE:-}" ] || WORKTREE="$(val worktree "$plan_out")"
+	fi
+
+	[ -n "${BRANCH:-}" ] || die "could not resolve a branch for the target"
+	[ -n "${WORKTREE:-}" ] || die "could not resolve a worktree for the target"
+
+	BASE="$BASE_ARG"
+	[ -n "$BASE" ] || BASE="$(detect_base)"
+	[ -n "$BASE" ] || die "cannot determine a base branch (pass --base)"
+}
+
+print_target() {
+	printf 'agent=%s\n' "${AGENT_ID:-<explicit>}"
+	printf 'role=%s\n' "${ROLE:-}"
+	printf 'branch=%s\n' "$BRANCH"
+	printf 'worktree=%s\n' "$WORKTREE"
+	printf 'base=%s\n' "$BASE"
+	printf 'repo=%s\n' "$REPO_ROOT"
+}
+
+# --- diff-command construction (pure) ----------------------------------------
+# pick_renderer: echo the patch renderer to use. `delta` if installed; else the
+# git default pager when stdout is a TTY (git auto-pages); else plain (no pager).
+pick_renderer() {
+	if command -v delta >/dev/null 2>&1; then
+		printf 'delta'
+	elif [ -t 1 ]; then
+		printf 'git-pager'
+	else
+		printf 'plain'
+	fi
+}
+
+# --- show --------------------------------------------------------------------
+cmd_show() {
+	resolve_target
+	renderer="$(pick_renderer)"
+	stat_range="${BASE}...${BRANCH}"
+
+	if [ "$DRYRUN" = "1" ]; then
+		print_target
+		printf 'renderer=%s\n' "$renderer"
+		printf 'would-run: git -C %s --no-pager diff --stat %s\n' "$REPO_ROOT" "$stat_range"
+		case "$renderer" in
+			delta)     printf 'would-run: git -C %s --no-pager diff %s | delta\n' "$REPO_ROOT" "$stat_range" ;;
+			git-pager) printf 'would-run: git -C %s diff %s   (git pager)\n' "$REPO_ROOT" "$stat_range" ;;
+			plain)     printf 'would-run: git -C %s --no-pager diff %s\n' "$REPO_ROOT" "$stat_range" ;;
+		esac
+		return 0
+	fi
+
+	git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" \
+		|| die "branch does not exist: $BRANCH"
+
+	printf '=== review: %s (agent %s) vs %s ===\n' "$BRANCH" "${AGENT_ID:-<explicit>}" "$BASE"
+	git -C "$REPO_ROOT" --no-pager diff --stat "$stat_range"
+	printf '\n'
+	case "$renderer" in
+		delta)     git -C "$REPO_ROOT" --no-pager diff "$stat_range" | delta ;;
+		git-pager) git -C "$REPO_ROOT" diff "$stat_range" ;;
+		plain)     git -C "$REPO_ROOT" --no-pager diff "$stat_range" ;;
+	esac
+}
+
+# --- merge-safety predicate (pure-ish; reads git, no writes) -----------------
+# merge_has_conflicts BASE BRANCH -> exit 0 if the merge WOULD conflict, 1 if it
+# is clean. Uses `git merge-tree --write-tree` (git >= 2.38) when available (no
+# working-tree touch); else the legacy 3-arg merge-tree + conflict-marker grep.
+merge_has_conflicts() {
+	mb_base="$1"; mb_branch="$2"
+	if git -C "$REPO_ROOT" merge-tree -h 2>&1 | grep -q -- '--write-tree'; then
+		if git -C "$REPO_ROOT" merge-tree --write-tree "$mb_base" "$mb_branch" >/dev/null 2>&1; then
+			return 1   # exit 0 from merge-tree => clean
+		fi
+		return 0       # non-zero => conflicts (or error; treated as unsafe)
+	fi
+	mbase="$(git -C "$REPO_ROOT" merge-base "$mb_base" "$mb_branch" 2>/dev/null)" || return 0
+	if git -C "$REPO_ROOT" merge-tree "$mbase" "$mb_base" "$mb_branch" 2>/dev/null | grep -q '^<<<<<<<'; then
+		return 0
+	fi
+	return 1
+}
+
+# --- approve -----------------------------------------------------------------
+cmd_approve() {
+	resolve_target
+	merge_flag="--no-ff"
+	[ "$FF_ONLY" = "1" ] && merge_flag="--ff-only"
+	msg="it2agent-review: merge $BRANCH into $BASE"
+	orig="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+
+	if [ "$DRYRUN" = "1" ]; then
+		print_target
+		printf 'merge-mode=%s\n' "$merge_flag"
+		printf 'would-run: git -C %s status --porcelain   (safety: worktree %s must be clean)\n' "$WORKTREE" "$WORKTREE"
+		printf 'would-run: git -C %s status --porcelain   (safety: main checkout must be clean)\n' "$REPO_ROOT"
+		printf 'would-run: git -C %s merge-tree --write-tree %s %s   (safety: no conflicts)\n' "$REPO_ROOT" "$BASE" "$BRANCH"
+		printf 'would-run: git -C %s checkout %s\n' "$REPO_ROOT" "$BASE"
+		printf 'would-run: git -C %s merge %s -m "%s" %s\n' "$REPO_ROOT" "$merge_flag" "$msg" "$BRANCH"
+		[ -n "$orig" ] && [ "$orig" != "$BASE" ] && [ "$orig" != "HEAD" ] \
+			&& printf 'would-run: git -C %s checkout %s   (restore prior branch)\n' "$REPO_ROOT" "$orig"
+		if [ "$CLEANUP" = "1" ]; then
+			printf 'would-run: it2agent-worktree cleanup --repo %s --id %s%s --base %s\n' \
+				"$REPO_ROOT" "${AGENT_ID:-<id>}" "$([ -n "$ROLE" ] && printf ' --role %s' "$ROLE")" "$BASE"
+		fi
+		return 0
+	fi
+
+	git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" \
+		|| die "branch does not exist: $BRANCH"
+
+	# SAFETY 1: the agent's worktree must be clean (no uncommitted/untracked work).
+	if [ -d "$WORKTREE" ]; then
+		if [ -n "$(git -C "$WORKTREE" status --porcelain 2>/dev/null)" ]; then
+			warn "refusing to merge: agent worktree $WORKTREE has uncommitted/untracked changes"
+			warn "the agent must commit or stash first. Nothing was merged."
+			return 1
+		fi
+	fi
+
+	# SAFETY 2: the main checkout must be clean so we can safely checkout+merge.
+	if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
+		warn "refusing to merge: the main checkout $REPO_ROOT is dirty"
+		warn "commit or stash there first. Nothing was merged."
+		return 1
+	fi
+
+	# Nothing to merge? Benign no-op (already reachable from base).
+	ahead="$(git -C "$REPO_ROOT" rev-list --count "$BASE..$BRANCH" 2>/dev/null || echo 0)"
+	if [ "$ahead" = "0" ]; then
+		warn "branch $BRANCH has no commits beyond $BASE; nothing to merge"
+		return 0
+	fi
+
+	# SAFETY 3: the merge must be conflict-free.
+	if merge_has_conflicts "$BASE" "$BRANCH"; then
+		warn "refusing to merge: $BRANCH conflicts with $BASE"
+		warn "the agent must rebase/resolve against $BASE. Nothing was merged."
+		return 1
+	fi
+
+	# Safe: checkout base, merge, restore the prior branch.
+	git -C "$REPO_ROOT" checkout "$BASE" >&2 || die "could not checkout $BASE"
+	if ! git -C "$REPO_ROOT" merge "$merge_flag" -m "$msg" "$BRANCH" >&2; then
+		git -C "$REPO_ROOT" merge --abort >/dev/null 2>&1 || true
+		[ -n "$orig" ] && [ "$orig" != "$BASE" ] && [ "$orig" != "HEAD" ] \
+			&& git -C "$REPO_ROOT" checkout "$orig" >/dev/null 2>&1 || true
+		warn "merge failed and was aborted; nothing changed"
+		return 1
+	fi
+	if [ -n "$orig" ] && [ "$orig" != "$BASE" ] && [ "$orig" != "HEAD" ]; then
+		git -C "$REPO_ROOT" checkout "$orig" >&2 2>/dev/null || true
+	fi
+	printf '%s: merged %s into %s (%s)\n' "$PROG" "$BRANCH" "$BASE" "$merge_flag"
+
+	# Optional post-merge cleanup via #13 (branch is now merged => safe removal).
+	if [ "$CLEANUP" = "1" ]; then
+		wt_helper="$(find_worktree_helper)" || { warn "cleanup requested but it2agent-worktree not found; skipped"; return 0; }
+		set -- cleanup --repo "$REPO_ROOT" --id "$AGENT_ID" --base "$BASE"
+		[ -n "$ROLE" ] && set -- "$@" --role "$ROLE"
+		[ "$NO_GATE" = "1" ] && set -- "$@" --no-gate
+		sh "$wt_helper" "$@" >&2 || warn "it2agent-worktree cleanup reported an issue"
+	fi
+}
+
+# --- request-changes ---------------------------------------------------------
+# Broker reachability: a socket file exists at the resolved path and python3 is
+# present. Path precedence: --broker-sock > $IT2AGENT_BROKER_SOCK > default.
+broker_sock_path() {
+	if [ -n "$BROKER_SOCK_ARG" ]; then
+		printf '%s' "$BROKER_SOCK_ARG"; return 0
+	fi
+	if [ -n "${IT2AGENT_BROKER_SOCK:-}" ]; then
+		printf '%s' "$IT2AGENT_BROKER_SOCK"; return 0
+	fi
+	# Mirror broker/paths.py: $XDG_RUNTIME_DIR/it2agent/broker.sock else state.
+	if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+		printf '%s/it2agent/broker.sock' "$XDG_RUNTIME_DIR"; return 0
+	fi
+	base="${XDG_STATE_HOME:-$HOME/.local/state}"
+	printf '%s/it2agent/broker.sock' "$base"
+}
+
+broker_reachable() {
+	[ "$NO_BROKER" = "1" ] && return 1
+	sock="$(broker_sock_path)"
+	[ -S "$sock" ] || return 1
+	command -v python3 >/dev/null 2>&1 || return 1
+	return 0
+}
+
+cmd_request_changes() {
+	[ -n "$NOTE" ] || die "request-changes needs a note: request-changes <agent> \"<note>\""
+	resolve_target
+	sock="$(broker_sock_path)"
+
+	if [ "$DRYRUN" = "1" ]; then
+		print_target
+		printf 'reviewer=%s\n' "$REVIEWER"
+		printf 'note=%s\n' "$NOTE"
+		if broker_reachable; then
+			printf 'route=broker\n'
+			notify="$(find_notify 2>/dev/null || printf 'review_notify.py')"
+			printf 'would-run: python3 %s --to %s --from %s --note "%s" --sock %s\n' \
+				"$notify" "${AGENT_ID:-<id>}" "$REVIEWER" "$NOTE" "$sock"
+		else
+			printf 'route=file-fallback%s\n' "$([ "$NO_BROKER" = 1 ] && printf ' (--no-broker)' || printf ' (broker unreachable)')"
+			printf 'would-run: write note to %s/.it2agent-review/CHANGES-REQUESTED-<ts>.md\n' "$WORKTREE"
+		fi
+		return 0
+	fi
+
+	# Preferred path: durable broker mailbox (#34/#35).
+	if broker_reachable; then
+		notify="$(find_notify)" || { warn "review_notify.py missing; falling back to a note file"; }
+		if [ -n "${notify:-}" ]; then
+			if python3 "$notify" --to "$AGENT_ID" --from "$REVIEWER" --note "$NOTE" --sock "$sock"; then
+				printf '%s: routed change request to agent %s via broker\n' "$PROG" "$AGENT_ID"
+				return 0
+			fi
+			warn "broker send failed; falling back to a note file"
+		fi
+	fi
+
+	# Fallback: write the note into the agent's worktree and print it.
+	if [ -d "$WORKTREE" ]; then
+		notedir="$WORKTREE/.it2agent-review"
+		mkdir -p "$notedir" || die "cannot create note dir: $notedir"
+		ts="$(date -u +%Y%m%dT%H%M%SZ)"
+		notefile="$notedir/CHANGES-REQUESTED-$ts.md"
+		{
+			printf '# Changes requested\n\n'
+			printf -- '- reviewer: %s\n' "$REVIEWER"
+			printf -- '- branch:   %s\n' "$BRANCH"
+			printf -- '- base:     %s\n\n' "$BASE"
+			printf '%s\n' "$NOTE"
+		} > "$notefile" || die "cannot write note: $notefile"
+		printf '%s: wrote change request to %s\n' "$PROG" "$notefile"
+	else
+		warn "worktree $WORKTREE not present; printing the note only"
+	fi
+	printf '--- changes requested for %s ---\n%s\n' "$BRANCH" "$NOTE"
+}
+
+# --- pane (optional iTerm2 split) --------------------------------------------
+# Escape a string for embedding in an AppleScript double-quoted literal.
+as_esc() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+build_pane_applescript() {
+	# The command run in the new pane: this same tool's `show` for the agent.
+	self="$(script_dir)/$PROG"
+	show_cmd="$self show"
+	[ -n "$AGENT_ID" ] && show_cmd="$show_cmd $AGENT_ID"
+	[ -n "$ROLE" ] && show_cmd="$show_cmd --role $ROLE"
+	[ -n "$BRANCH_ARG" ] && show_cmd="$show_cmd --branch $BRANCH_ARG"
+	[ -n "$BASE_ARG" ] && show_cmd="$show_cmd --base $BASE_ARG"
+	esc="$(as_esc "$show_cmd")"
+	cat <<APPLESCRIPT
+tell application "iTerm2"
+	tell current session of current window
+		set reviewSession to (split vertically with default profile)
+	end tell
+	tell reviewSession to write text "${esc}"
+end tell
+APPLESCRIPT
+}
+
+cmd_pane() {
+	resolve_target
+	as_text="$(build_pane_applescript)"
+	if [ "$DRYRUN" = "1" ]; then
+		print_target
+		printf '\nAppleScript that WOULD run (osascript -):\n'
+		printf '%s\n' "$as_text" | sed 's/^/  /'
+		return 0
+	fi
+	command -v osascript >/dev/null 2>&1 || die "osascript not found (the pane helper requires macOS/iTerm2)"
+	printf '%s\n' "$as_text" | osascript -
+}
+
+usage() {
+	cat <<EOF
+$PROG — per-agent diff/review surface (see the agent's diff; approve→merge or
+request changes). it2agent #14. Gated on $FLAG_KEY (default OFF).
+
+Usage:
+  $PROG <command> [<agent-id>] [options]
+
+Commands:
+  resolve          Print the resolved target (branch, worktree, base) for an
+                   agent. Pure, no side effects, no gate.
+  show             Render the agent's worktree diff vs base (--stat + full
+                   patch). Gated. --dry-run prints the git commands.
+  approve          Merge the agent's branch into base IF SAFE (gated): refuses a
+                   dirty agent worktree, a dirty main checkout, or a conflicting
+                   merge. --dry-run prints the plan.
+  request-changes  Route a note to the agent (broker mailbox if reachable, else a
+                   note file in the worktree). Gated.
+  pane             Open the review 'show' in an iTerm2 split pane (osascript).
+                   Optional; --dry-run prints the AppleScript.
+  -h, --help       Show this help.
+
+Target resolution (reuses #13):
+  <agent-id>          Positional agent id (or --id). Reused with the #13
+                      allocator to derive the SAME branch + worktree.
+  --id <id>           Agent id (alternative to the positional form).
+  --role <role>       Agent role (feeds the #13 slug so resolution matches).
+  --branch <ref>      Explicit branch (skips allocator derivation).
+  --worktree <dir>    Explicit worktree path (skips allocator derivation).
+  --base <ref>        Base to diff/merge against (default: auto-detect
+                      origin/HEAD, then main/master, then current branch).
+  --repo <dir>        Repo to operate on (default: \$PWD).
+
+approve options:
+  --ff-only           Fast-forward only (default is --no-ff: a merge commit).
+  --cleanup           After a successful merge, run #13's worktree cleanup.
+
+request-changes options:
+  request-changes <agent> "<note>"   The note is the last non-option argument.
+  --from <who>        Reviewer id recorded on the note (default: \$USER or
+                      \$IT2AGENT_REVIEWER, else 'reviewer').
+  --broker-sock <p>   Broker socket path (default: \$IT2AGENT_BROKER_SOCK or the
+                      XDG default). Reachable => routed to the mailbox.
+  --no-broker         Skip the broker; always use the worktree note-file fallback.
+
+Common options:
+  --dry-run           Print the commands (git / broker / osascript) it WOULD run;
+                      execute nothing.
+  --no-gate           Bypass the $FLAG_KEY gate (local testing).
+
+Environment:
+  IT2AGENT_FORCE=1        Bypass the feature-flag gate (like --no-gate).
+  IT2AGENT_REVIEWER       Default reviewer id for request-changes.
+  IT2AGENT_BROKER_SOCK    Broker socket path override.
+
+Gating: show/approve/request-changes/pane act only when "$FLAG_KEY" is ON
+(checked via it2agent-flag). When OFF they no-op and exit 0 (fail-safe).
+resolve is pure and never gates.
+
+Workflow, actions, iTerm2 panes, and #13/broker interop: it2agent/review/README.md
+EOF
+}
+
+# --- parse -------------------------------------------------------------------
+[ $# -ge 1 ] || { usage >&2; die "no command given"; }
+
+CMD="$1"; shift
+case "$CMD" in
+	-h|--help|help) usage; exit 0 ;;
+	resolve|show|approve|request-changes|pane) ;;
+	*) die "unknown command: $CMD (try --help)" ;;
+esac
+
+REPO_ARG=""
+AGENT_ID=""
+ROLE=""
+BRANCH_ARG=""
+WORKTREE_ARG=""
+BASE_ARG=""
+DRYRUN=0
+NO_GATE=0
+FF_ONLY=0
+CLEANUP=0
+NO_BROKER=0
+BROKER_SOCK_ARG=""
+REVIEWER="${IT2AGENT_REVIEWER:-${USER:-reviewer}}"
+NOTE=""
+
+[ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
+
+# Positional collection for a bare agent id and (for request-changes) the note.
+POS_COUNT=0
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--repo) [ $# -ge 2 ] || die "--repo requires a <dir>"; REPO_ARG="$2"; shift 2 ;;
+		--repo=*) REPO_ARG="${1#--repo=}"; shift ;;
+		--id) [ $# -ge 2 ] || die "--id requires an <id>"; AGENT_ID="$2"; shift 2 ;;
+		--id=*) AGENT_ID="${1#--id=}"; shift ;;
+		--role) [ $# -ge 2 ] || die "--role requires a <role>"; ROLE="$2"; shift 2 ;;
+		--role=*) ROLE="${1#--role=}"; shift ;;
+		--branch) [ $# -ge 2 ] || die "--branch requires a <ref>"; BRANCH_ARG="$2"; shift 2 ;;
+		--branch=*) BRANCH_ARG="${1#--branch=}"; shift ;;
+		--worktree) [ $# -ge 2 ] || die "--worktree requires a <dir>"; WORKTREE_ARG="$2"; shift 2 ;;
+		--worktree=*) WORKTREE_ARG="${1#--worktree=}"; shift ;;
+		--base) [ $# -ge 2 ] || die "--base requires a <ref>"; BASE_ARG="$2"; shift 2 ;;
+		--base=*) BASE_ARG="${1#--base=}"; shift ;;
+		--from) [ $# -ge 2 ] || die "--from requires a <who>"; REVIEWER="$2"; shift 2 ;;
+		--from=*) REVIEWER="${1#--from=}"; shift ;;
+		--broker-sock) [ $# -ge 2 ] || die "--broker-sock requires a <path>"; BROKER_SOCK_ARG="$2"; shift 2 ;;
+		--broker-sock=*) BROKER_SOCK_ARG="${1#--broker-sock=}"; shift ;;
+		--ff-only) FF_ONLY=1; shift ;;
+		--cleanup) CLEANUP=1; shift ;;
+		--no-broker) NO_BROKER=1; shift ;;
+		--dry-run) DRYRUN=1; shift ;;
+		--no-gate) NO_GATE=1; shift ;;
+		-h|--help) usage; exit 0 ;;
+		--) shift; break ;;
+		-*) die "unknown option: $1 (try --help)" ;;
+		*)
+			# First positional = agent id (unless --id/--branch already gave us a
+			# target); for request-changes a second positional is the note.
+			if [ "$POS_COUNT" = "0" ] && [ -z "$AGENT_ID" ]; then
+				AGENT_ID="$1"
+			elif [ "$CMD" = "request-changes" ] && [ -z "$NOTE" ]; then
+				NOTE="$1"
+			else
+				die "unexpected argument: $1 (try --help)"
+			fi
+			POS_COUNT=$((POS_COUNT + 1))
+			shift ;;
+	esac
+done
+
+# A trailing note after `--` (for request-changes) or explicit target.
+if [ "$CMD" = "request-changes" ] && [ -z "$NOTE" ] && [ $# -gt 0 ]; then
+	NOTE="$1"; shift
+fi
+
+resolve_repo "$REPO_ARG"
+
+case "$CMD" in
+	resolve)
+		resolve_target
+		print_target
+		;;
+	show)
+		if ! gate_open; then
+			warn "feature '$FLAG_KEY' is disabled; no diff shown (enable with: it2agent-flag enable $FLAG_KEY)"
+			exit 0
+		fi
+		cmd_show
+		;;
+	approve)
+		if ! gate_open; then
+			warn "feature '$FLAG_KEY' is disabled; no merge performed (enable with: it2agent-flag enable $FLAG_KEY)"
+			exit 0
+		fi
+		cmd_approve
+		;;
+	request-changes)
+		if ! gate_open; then
+			warn "feature '$FLAG_KEY' is disabled; no change request sent (enable with: it2agent-flag enable $FLAG_KEY)"
+			exit 0
+		fi
+		cmd_request_changes
+		;;
+	pane)
+		if ! gate_open; then
+			warn "feature '$FLAG_KEY' is disabled; no pane opened (enable with: it2agent-flag enable $FLAG_KEY)"
+			exit 0
+		fi
+		cmd_pane
+		;;
+esac

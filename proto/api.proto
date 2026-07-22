@@ -1615,7 +1615,7 @@ message SessionSummary {
     // spawnTerm extension (fork-only): descriptive labels derived from the
     // session's user-vars. Only the agent-identity subset is exposed: user-vars
     // whose (dot-free) name begins with "agent_" (e.g. user.agent_status,
-    // user.agent_role, user.agent_task, user.agent_id set by spawnterm-emit).
+    // user.agent_role, user.agent_task, user.agent_id set by it2agent-emit).
     // Each entry is "<name>=<value>", e.g. "agent_status=running". Other
     // user-vars are intentionally not exposed. Sorted; empty when the session
     // has no agent_* user-vars.

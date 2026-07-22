@@ -26,33 +26,34 @@ Major New Features:
   takes your API key, and walks you through
   pairing your phone.
 
-- Settings > General > AI now has a spawnTerm
-  tab with a checkbox per spawnTerm capability.
-  Each toggle reads and writes the feature flag
-  in ~/.config/spawnterm/config.toml through the
-  spawnterm-flag CLI, which stays the single
-  source of truth. If spawnterm-flag cannot be
+- Settings > General > AI now has an AI
+  Agents tab with a checkbox per agent
+  capability. Each toggle reads and writes
+  the feature flag in
+  ~/.config/it2agent/config.toml through the
+  it2agent-flag CLI, which stays the single
+  source of truth. If it2agent-flag cannot be
   found the checkboxes are shown disabled.
 
-- A new spawnTerm capability, "Claude Code
+- A new agent capability, "Claude Code
   Status Bar", adds an opt-in status-bar
   component that aggregates Claude Code session
   status (Waiting/Working/Idle) across all
   windows, with a popover listing each session.
   Off by default; enable it in Settings >
-  General > AI > spawnTerm. Adapted from
+  General > AI > AI Agents. Adapted from
   gnachman/iTerm2#648.
 
-- A new spawnTerm capability, "AI Agent Menu
+- A new agent capability, "AI Agent Menu
   Bar", adds an opt-in menu bar status item
   with a live count badge of how many AI
   agents are currently working (terminal
   Claude Code sessions and built-in AI chats).
   Off by default; enable it in Settings >
-  General > AI > spawnTerm. Adapted from
+  General > AI > AI Agents. Adapted from
   gnachman/iTerm2#670.
 
-- A new spawnTerm capability, "Codex Tab
+- A new agent capability, "Codex Tab
   Status", shows Codex CLI working/idle
   activity in the tab status. Codex does not
   emit OSC 21337; it prefixes the terminal
@@ -61,7 +62,7 @@ Major New Features:
   that and drives the tab indicator dot and
   subtitle like a native emitter. Off by
   default; enable it in Settings > General >
-  AI > spawnTerm. Adapted from
+  AI > AI Agents. Adapted from
   gnachman/iTerm2#673.
 
 - The Companion app can now receive push

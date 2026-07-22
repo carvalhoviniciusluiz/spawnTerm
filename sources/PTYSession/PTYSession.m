@@ -176,7 +176,7 @@
 #import "iTermShortcut.h"
 #import "iTermShortcutInputView.h"
 #import "iTermSlowOperationGateway.h"
-#import "iTermSpawnTermCapabilities.h"
+#import "iTermAgentCapabilities.h"
 #import "iTermSnippetsModel.h"
 #import "iTermSoundPlayer.h"
 #import "iTermStandardKeyMapper.h"
@@ -15480,10 +15480,10 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
 // by the built-in Codex title-changed trigger and directly on foreground-job
 // changes (so working clears when codex exits without a fresh title).
 - (void)screenApplyCodexTitleStatusWithTitle:(NSString *)title {
-    // spawnTerm: the Codex tab-status shim is gated behind a per-user feature
+    // it2agent: the Codex tab-status shim is gated behind a per-user feature
     // flag (default OFF). When OFF we leave tab status entirely to native
     // OSC 21337 emitters — no synthesized Codex working/idle side effects.
-    if (![iTermSpawnTermCapabilities isEnabledForCapability:@"codex_status"]) {
+    if (![iTermAgentCapabilities isEnabledForCapability:@"codex_status"]) {
         return;
     }
     // tabStatus is unsynchronized mutable state; same threading contract as

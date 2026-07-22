@@ -26,7 +26,7 @@
 #import "iTermRemotePreferences.h"
 #import "iTermScriptsMenuController.h"
 #import "iTermShellHistoryController.h"
-#import "iTermSpawnTermCapabilities.h"
+#import "iTermAgentCapabilities.h"
 #import "iTermUserDefaults.h"
 #import "iTermUserDefaultsObserver.h"
 #import "iTermWarning.h"
@@ -989,11 +989,11 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     IBOutlet NSButton *_aiFeatureStreamingResponses;
     IBOutlet NSPopUpButton *_vectorStore;
 
-    // spawnTerm capability toggles. The container view is an empty pane defined
+    // it2agent capability toggles. The container view is an empty pane defined
     // in the XIB; the checkboxes inside it are created programmatically in
-    // -setupSpawnTermCapabilities (see there for why).
-    IBOutlet NSView *_spawnTermCapabilitiesView;
-    NSArray<PreferenceInfo *> *_spawnTermCapabilityInfos;
+    // -setupAgentCapabilities (see there for why).
+    IBOutlet NSView *_agentCapabilitiesView;
+    NSArray<PreferenceInfo *> *_agentCapabilityInfos;
 
     IBOutlet NSButton *_useRecommendedModel;
     IBOutlet NSView *_manualAISettings;
@@ -1814,7 +1814,7 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
              relatedView:nil
                     type:kPreferenceInfoTypeCheckbox];
 
-    [self setupSpawnTermCapabilities];
+    [self setupAgentCapabilities];
 
     [self validatePlugin];
     [self updateEnabledState];
@@ -1824,26 +1824,26 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     [self updateAIEnabled];
 }
 
-#pragma mark - spawnTerm capabilities
+#pragma mark - it2agent capabilities
 
-// The spawnTerm capability list is dynamic (currently 11 flags) and its single
-// source of truth is ~/.config/spawnterm/config.toml, read/written by the
-// spawnterm-flag CLI — not NSUserDefaults. We create the checkboxes in code
+// The it2agent capability list is dynamic (currently 11 flags) and its single
+// source of truth is ~/.config/it2agent/config.toml, read/written by the
+// it2agent-flag CLI — not NSUserDefaults. We create the checkboxes in code
 // rather than editing the monolithic PreferencePanel.xib by hand: the XIB
-// contributes only an empty fixed-frame container pane (_spawnTermCapabilitiesView),
+// contributes only an empty fixed-frame container pane (_agentCapabilitiesView),
 // and the buttons are laid out here with springs-and-struts (no auto layout),
 // matching the surrounding fixed-frame AI controls. Each checkbox is bound with
-// a synthetic getter/setter that delegates to spawnterm-flag, mirroring the
+// a synthetic getter/setter that delegates to it2agent-flag, mirroring the
 // _enableAI pattern, so config.toml stays authoritative and no flag logic is
 // reimplemented in ObjC.
-- (void)setupSpawnTermCapabilities {
-    NSView *container = _spawnTermCapabilitiesView;
+- (void)setupAgentCapabilities {
+    NSView *container = _agentCapabilitiesView;
     if (!container) {
         return;
     }
-    [iTermSpawnTermCapabilities invalidateCache];
+    [iTermAgentCapabilities invalidateCache];
 
-    const BOOL available = [iTermSpawnTermCapabilities available];
+    const BOOL available = [iTermAgentCapabilities available];
     const CGFloat containerHeight = NSHeight(container.bounds);
     const CGFloat leftMargin = 20;
     const CGFloat columnWidth = 290;
@@ -1854,12 +1854,12 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     // capabilities so the grid always fits the fixed 651x291 container. A
     // hardcoded rowsPerColumn (was 6, for the original 11 flags) overflowed into
     // a third off-panel column once imports #58/#59/#60 added 3 more flags.
-    NSArray<NSString *> *capabilities = [iTermSpawnTermCapabilities capabilityIdentifiers];
+    NSArray<NSString *> *capabilities = [iTermAgentCapabilities capabilityIdentifiers];
     const NSInteger columnCount = 2;
     const NSInteger rowsPerColumn = MAX((NSInteger)1,
                                         ((NSInteger)capabilities.count + columnCount - 1) / columnCount);
 
-    NSTextField *header = [NSTextField labelWithString:@"spawnTerm capabilities"];
+    NSTextField *header = [NSTextField labelWithString:@"Agent Capabilities"];
     header.frame = NSMakeRect(leftMargin,
                               containerHeight - headerHeight - 8,
                               columnWidth * 2,
@@ -1867,7 +1867,7 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     header.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
     [container addSubview:header];
 
-    NSTextField *note = [NSTextField labelWithString:available ? @"Toggle per-user feature flags stored in ~/.config/spawnterm/config.toml." : @"spawnterm-flag was not found. Install it or set $SPAWNTERM_FLAG to enable these toggles."];
+    NSTextField *note = [NSTextField labelWithString:available ? @"Toggle per-user feature flags stored in ~/.config/it2agent/config.toml." : @"it2agent-flag was not found. Install it or set $IT2AGENT_FLAG to enable these toggles."];
     note.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     note.textColor = [NSColor secondaryLabelColor];
     note.frame = NSMakeRect(leftMargin,
@@ -1891,43 +1891,43 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         // click never reaches -settingChanged: and the flag is not written.
         checkbox.target = self;
         checkbox.action = @selector(settingChanged:);
-        checkbox.title = [iTermSpawnTermCapabilities displayNameForCapability:capability];
+        checkbox.title = [iTermAgentCapabilities displayNameForCapability:capability];
         checkbox.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
         [container addSubview:checkbox];
 
-        NSString *key = [iTermSpawnTermCapabilities preferenceKeyForCapability:capability];
+        NSString *key = [iTermAgentCapabilities preferenceKeyForCapability:capability];
         PreferenceInfo *info = [self defineControl:checkbox
                                                key:key
                                        relatedView:nil
                                               type:kPreferenceInfoTypeCheckbox];
         info.syntheticGetter = ^id{
-            return @([iTermSpawnTermCapabilities isEnabledForCapability:capability]);
+            return @([iTermAgentCapabilities isEnabledForCapability:capability]);
         };
         info.syntheticSetter = ^(id newValue) {
-            [iTermSpawnTermCapabilities setEnabled:[newValue boolValue] forCapability:capability];
+            [iTermAgentCapabilities setEnabled:[newValue boolValue] forCapability:capability];
         };
         info.shouldBeEnabled = ^BOOL{
-            return [iTermSpawnTermCapabilities available];
+            return [iTermAgentCapabilities available];
         };
         [infos addObject:info];
     }];
 
-    _spawnTermCapabilityInfos = [infos copy];
+    _agentCapabilityInfos = [infos copy];
 }
 
 // Re-read config.toml when the pane is shown so external edits (CLI or hand
 // edits) are reflected without restarting iTerm2.
 - (void)viewDidAppear {
     [super viewDidAppear];
-    [self refreshSpawnTermCapabilities];
+    [self refreshAgentCapabilities];
 }
 
-- (void)refreshSpawnTermCapabilities {
-    if (_spawnTermCapabilityInfos.count == 0) {
+- (void)refreshAgentCapabilities {
+    if (_agentCapabilityInfos.count == 0) {
         return;
     }
-    [iTermSpawnTermCapabilities invalidateCache];
-    for (PreferenceInfo *info in _spawnTermCapabilityInfos) {
+    [iTermAgentCapabilities invalidateCache];
+    for (PreferenceInfo *info in _agentCapabilityInfos) {
         [self updateValueForInfo:info];
     }
 }
