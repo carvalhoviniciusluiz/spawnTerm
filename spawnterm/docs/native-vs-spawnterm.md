@@ -34,14 +34,12 @@ history. It is the unsolved frontier the market analysis pointed at, and it is g
 | **tmux -CC persistence** | ❌ none | ✅ #5 | **spawnTerm only** |
 | **Agent-agnostic CLI / MCP** | orchestration only via iTerm2's built-in chat (not MCP) | ✅ CLI + escape codes + MCP (#18) usable by any agent | **Different model — complementary** |
 | Feature-flag config + settings pane | install/uninstall wizard | ✅ per-capability flags (#11) + AI-tab pane (#12) | spawnTerm granular |
-| i18n | English-only | ✅ en + pt-BR (#66/#67) | spawnTerm only (our surfaces) |
 | Cross-machine | ❌ (peers = same-Mac panes; iPhone = push only) | not built | neither |
 
 ## Recommendation (keep / retire-or-align / complement)
 **Keep — the moat (native lacks entirely):**
 - **#4 broker** (durable mailbox + ack + replay + persistent registry + handoff-with-history) — the core differentiator.
 - **#13 worktree + $PORT/$NS isolation**, **#16 cost dashboard**, **#15 janitor gate**, **#5 tmux -CC** — real gaps native doesn't cover.
-- **i18n** for our surfaces.
 
 **Retire or align to native (we duplicate it, often worse):**
 - **Status board (#7/#8 emit color/badge, #29 dashboard):** switch from the parallel `SetUserVar=agent_status` to iTerm2's **cc-status / OSC 21337** path so status shows in the native tab status + Cockpit instead of a second, weaker board.

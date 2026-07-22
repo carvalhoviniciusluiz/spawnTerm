@@ -902,10 +902,6 @@ static NSString *sPreviousVersion;
         for (NSString *key in [iTermSpawnTermCapabilities allPreferenceKeys]) {
             withSpawnTermPlaceholders[key] = @NO;  // ignored — synthetic value
         }
-        // Likewise the language popup: config.toml owns the value (via
-        // spawnterm-lang); this string placeholder only lets -defineControl:
-        // accept the synthetic key for a kPreferenceInfoTypeStringPopup.
-        withSpawnTermPlaceholders[[iTermSpawnTermCapabilities languagePreferenceKey]] = @"en";  // ignored — synthetic value
         dict = withSpawnTermPlaceholders;
     }
     return dict;

@@ -994,12 +994,6 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     // -setupSpawnTermCapabilities (see there for why).
     IBOutlet NSView *_spawnTermCapabilitiesView;
     NSArray<PreferenceInfo *> *_spawnTermCapabilityInfos;
-    // Checkboxes, parallel to +[iTermSpawnTermCapabilities capabilityIdentifiers],
-    // kept so their titles/tooltips can be re-localized in place when the user
-    // changes the language without tearing down and re-registering the controls.
-    NSArray<NSButton *> *_spawnTermCapabilityCheckboxes;
-    NSTextField *_spawnTermLanguageLabel;
-    NSPopUpButton *_spawnTermLanguagePopup;
 
     IBOutlet NSButton *_useRecommendedModel;
     IBOutlet NSView *_manualAISettings;
@@ -1885,7 +1879,6 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
 
     const CGFloat firstRowTop = containerHeight - headerHeight - 8 - rowHeight * 2;
     NSMutableArray<PreferenceInfo *> *infos = [NSMutableArray array];
-    NSMutableArray<NSButton *> *checkboxes = [NSMutableArray array];
     [capabilities enumerateObjectsUsingBlock:^(NSString *capability, NSUInteger idx, BOOL *stop) {
         const NSInteger column = (NSInteger)idx / rowsPerColumn;
         const NSInteger row = (NSInteger)idx % rowsPerColumn;
@@ -1898,13 +1891,9 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         // click never reaches -settingChanged: and the flag is not written.
         checkbox.target = self;
         checkbox.action = @selector(settingChanged:);
-        // Labels come from the i18n catalog in the active language, falling back
-        // to the built-in English map when spawnterm-i18n is unavailable.
-        checkbox.title = [iTermSpawnTermCapabilities localizedNameForCapability:capability];
-        checkbox.toolTip = [iTermSpawnTermCapabilities localizedDescForCapability:capability];
+        checkbox.title = [iTermSpawnTermCapabilities displayNameForCapability:capability];
         checkbox.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
         [container addSubview:checkbox];
-        [checkboxes addObject:checkbox];
 
         NSString *key = [iTermSpawnTermCapabilities preferenceKeyForCapability:capability];
         PreferenceInfo *info = [self defineControl:checkbox
@@ -1922,82 +1911,8 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         };
         [infos addObject:info];
     }];
-    _spawnTermCapabilityCheckboxes = [checkboxes copy];
-
-    // Language picker, below the capability grid. Fixed-frame / springs-and-struts
-    // like the checkboxes (no auto layout). The popup stores the raw language code
-    // (en/pt-BR/system) as each item's representedObject and shows a human label;
-    // it is bound to config.toml (via spawnterm-lang) with synthetic get/set.
-    const CGFloat languageRowY = firstRowTop - rowsPerColumn * rowHeight - 6;
-    const CGFloat labelWidth = 90;
-    const CGFloat popupWidth = 200;
-    NSTextField *languageLabel = [NSTextField labelWithString:[iTermSpawnTermCapabilities languageFieldLabel]];
-    languageLabel.frame = NSMakeRect(leftMargin, languageRowY, labelWidth, checkboxHeight);
-    languageLabel.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
-    [container addSubview:languageLabel];
-    _spawnTermLanguageLabel = languageLabel;
-
-    NSPopUpButton *languagePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(leftMargin + labelWidth, languageRowY - 3, popupWidth, checkboxHeight + 6)
-                                                              pullsDown:NO];
-    languagePopup.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
-    // Wire the action so selecting a language reaches -settingChanged: (see the
-    // checkbox note above); without this the popup selection is never persisted.
-    languagePopup.target = self;
-    languagePopup.action = @selector(settingChanged:);
-    for (NSString *code in [iTermSpawnTermCapabilities languageCodes]) {
-        [languagePopup addItemWithTitle:[iTermSpawnTermCapabilities displayNameForLanguageCode:code]];
-        languagePopup.lastItem.representedObject = code;
-    }
-    [container addSubview:languagePopup];
-    _spawnTermLanguagePopup = languagePopup;
-
-    PreferenceInfo *languageInfo = [self defineControl:languagePopup
-                                                   key:[iTermSpawnTermCapabilities languagePreferenceKey]
-                                           relatedView:nil
-                                                  type:kPreferenceInfoTypeStringPopup];
-    languageInfo.syntheticGetter = ^id{
-        // Show the RAW stored code (en/pt-BR/system), not the resolved language.
-        return [iTermSpawnTermCapabilities currentLanguageCode];
-    };
-    languageInfo.syntheticSetter = ^(id newValue) {
-        [iTermSpawnTermCapabilities setCurrentLanguageCode:newValue];
-    };
-    languageInfo.shouldBeEnabled = ^BOOL{
-        return [iTermSpawnTermCapabilities languageAvailable];
-    };
-    __weak __typeof(self) weakSelf = self;
-    languageInfo.onChange = ^{
-        // The active language changed: re-localize every label in this pane.
-        [weakSelf relocalizeSpawnTermCapabilities];
-    };
-    [infos addObject:languageInfo];
 
     _spawnTermCapabilityInfos = [infos copy];
-}
-
-// Re-apply localized text to the pane's controls after a language change. The
-// controls and their PreferenceInfo bindings are left in place (only titles and
-// tooltips change), so no keyMap churn is needed. Capability on/off values are
-// refreshed too since -invalidateCache (triggered by the language write) dropped
-// the flag-state snapshot.
-- (void)relocalizeSpawnTermCapabilities {
-    NSArray<NSString *> *capabilities = [iTermSpawnTermCapabilities capabilityIdentifiers];
-    [_spawnTermCapabilityCheckboxes enumerateObjectsUsingBlock:^(NSButton *checkbox, NSUInteger idx, BOOL *stop) {
-        if (idx >= capabilities.count) {
-            return;
-        }
-        NSString *capability = capabilities[idx];
-        checkbox.title = [iTermSpawnTermCapabilities localizedNameForCapability:capability];
-        checkbox.toolTip = [iTermSpawnTermCapabilities localizedDescForCapability:capability];
-    }];
-    _spawnTermLanguageLabel.stringValue = [iTermSpawnTermCapabilities languageFieldLabel];
-    for (NSMenuItem *item in _spawnTermLanguagePopup.itemArray) {
-        NSString *code = item.representedObject;
-        if (code) {
-            item.title = [iTermSpawnTermCapabilities displayNameForLanguageCode:code];
-        }
-    }
-    [self refreshSpawnTermCapabilities];
 }
 
 // Re-read config.toml when the pane is shown so external edits (CLI or hand
