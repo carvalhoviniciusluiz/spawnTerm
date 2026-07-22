@@ -26,6 +26,7 @@
 #import "iTermRemotePreferences.h"
 #import "iTermScriptsMenuController.h"
 #import "iTermShellHistoryController.h"
+#import "iTermSpawnTermCapabilities.h"
 #import "iTermUserDefaults.h"
 #import "iTermUserDefaultsObserver.h"
 #import "iTermWarning.h"
@@ -988,6 +989,12 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     IBOutlet NSButton *_aiFeatureStreamingResponses;
     IBOutlet NSPopUpButton *_vectorStore;
 
+    // spawnTerm capability toggles. The container view is an empty pane defined
+    // in the XIB; the checkboxes inside it are created programmatically in
+    // -setupSpawnTermCapabilities (see there for why).
+    IBOutlet NSView *_spawnTermCapabilitiesView;
+    NSArray<PreferenceInfo *> *_spawnTermCapabilityInfos;
+
     IBOutlet NSButton *_useRecommendedModel;
     IBOutlet NSView *_manualAISettings;
     NSWindow *_manualAIConfigurationSheet;
@@ -1807,12 +1814,110 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
              relatedView:nil
                     type:kPreferenceInfoTypeCheckbox];
 
+    [self setupSpawnTermCapabilities];
+
     [self validatePlugin];
     [self updateEnabledState];
     [self commitControls];
     [self updateValueForInfo:allowSendingClipboardInfo];
     [self updateValueForInfo:enableAIInfo];
     [self updateAIEnabled];
+}
+
+#pragma mark - spawnTerm capabilities
+
+// The spawnTerm capability list is dynamic (currently 11 flags) and its single
+// source of truth is ~/.config/spawnterm/config.toml, read/written by the
+// spawnterm-flag CLI — not NSUserDefaults. We create the checkboxes in code
+// rather than editing the monolithic PreferencePanel.xib by hand: the XIB
+// contributes only an empty fixed-frame container pane (_spawnTermCapabilitiesView),
+// and the buttons are laid out here with springs-and-struts (no auto layout),
+// matching the surrounding fixed-frame AI controls. Each checkbox is bound with
+// a synthetic getter/setter that delegates to spawnterm-flag, mirroring the
+// _enableAI pattern, so config.toml stays authoritative and no flag logic is
+// reimplemented in ObjC.
+- (void)setupSpawnTermCapabilities {
+    NSView *container = _spawnTermCapabilitiesView;
+    if (!container) {
+        return;
+    }
+    [iTermSpawnTermCapabilities invalidateCache];
+
+    const BOOL available = [iTermSpawnTermCapabilities available];
+    const CGFloat containerHeight = NSHeight(container.bounds);
+    const CGFloat leftMargin = 20;
+    const CGFloat columnWidth = 290;
+    const CGFloat rowHeight = 26;
+    const CGFloat checkboxHeight = 18;
+    const CGFloat headerHeight = 17;
+    const NSInteger rowsPerColumn = 6;  // 6 + 5 across two columns for 11 flags.
+
+    NSTextField *header = [NSTextField labelWithString:@"spawnTerm capabilities"];
+    header.frame = NSMakeRect(leftMargin,
+                              containerHeight - headerHeight - 8,
+                              columnWidth * 2,
+                              headerHeight);
+    header.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    [container addSubview:header];
+
+    NSTextField *note = [NSTextField labelWithString:available ? @"Toggle per-user feature flags stored in ~/.config/spawnterm/config.toml." : @"spawnterm-flag was not found. Install it or set $SPAWNTERM_FLAG to enable these toggles."];
+    note.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+    note.textColor = [NSColor secondaryLabelColor];
+    note.frame = NSMakeRect(leftMargin,
+                            containerHeight - headerHeight - 8 - rowHeight,
+                            columnWidth * 2,
+                            headerHeight);
+    note.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    [container addSubview:note];
+
+    const CGFloat firstRowTop = containerHeight - headerHeight - 8 - rowHeight * 2;
+    NSMutableArray<PreferenceInfo *> *infos = [NSMutableArray array];
+    NSArray<NSString *> *capabilities = [iTermSpawnTermCapabilities capabilityIdentifiers];
+    [capabilities enumerateObjectsUsingBlock:^(NSString *capability, NSUInteger idx, BOOL *stop) {
+        const NSInteger column = (NSInteger)idx / rowsPerColumn;
+        const NSInteger row = (NSInteger)idx % rowsPerColumn;
+        const CGFloat x = leftMargin + column * columnWidth;
+        const CGFloat y = firstRowTop - row * rowHeight;
+        NSButton *checkbox = [[NSButton alloc] initWithFrame:NSMakeRect(x, y, columnWidth - 10, checkboxHeight)];
+        [checkbox setButtonType:NSButtonTypeSwitch];
+        checkbox.title = [iTermSpawnTermCapabilities displayNameForCapability:capability];
+        checkbox.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+        [container addSubview:checkbox];
+
+        NSString *key = [iTermSpawnTermCapabilities preferenceKeyForCapability:capability];
+        PreferenceInfo *info = [self defineControl:checkbox
+                                               key:key
+                                       relatedView:nil
+                                              type:kPreferenceInfoTypeCheckbox];
+        info.syntheticGetter = ^id{
+            return @([iTermSpawnTermCapabilities isEnabledForCapability:capability]);
+        };
+        info.syntheticSetter = ^(id newValue) {
+            [iTermSpawnTermCapabilities setEnabled:[newValue boolValue] forCapability:capability];
+        };
+        info.shouldBeEnabled = ^BOOL{
+            return [iTermSpawnTermCapabilities available];
+        };
+        [infos addObject:info];
+    }];
+    _spawnTermCapabilityInfos = [infos copy];
+}
+
+// Re-read config.toml when the pane is shown so external edits (CLI or hand
+// edits) are reflected without restarting iTerm2.
+- (void)viewDidAppear {
+    [super viewDidAppear];
+    [self refreshSpawnTermCapabilities];
+}
+
+- (void)refreshSpawnTermCapabilities {
+    if (_spawnTermCapabilityInfos.count == 0) {
+        return;
+    }
+    [iTermSpawnTermCapabilities invalidateCache];
+    for (PreferenceInfo *info in _spawnTermCapabilityInfos) {
+        [self updateValueForInfo:info];
+    }
 }
 
 // The single source of per-prompt metadata: the preference key plus,
