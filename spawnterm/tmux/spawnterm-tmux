@@ -1,0 +1,484 @@
+#!/usr/bin/env sh
+# spawnterm-tmux — spawn (and reattach) an AI agent inside a native iTerm2
+# `tmux -CC` session so the agent's window/layout/process survive quit,
+# disconnect, and crashes, and can be re-opened later with a single command.
+#
+# spawnTerm Tier 3 (#5). scope:external-tooling — this is glue that drives
+# iTerm2 via its AppleScript API + shells out to `tmux`, `spawnterm-emit`,
+# `spawnterm-worktree`, and `spawnterm-flag`. It NEVER modifies iTerm2 source
+# and never re-implements iTerm2 escape codes itself.
+#
+# ---------------------------------------------------------------------------
+# WHY tmux -CC (the persistence model)
+# ---------------------------------------------------------------------------
+# `tmux -CC` is iTerm2's *native* tmux integration: running `tmux -CC
+# new-session`/`attach` in an iTerm2 tab makes iTerm2 open real, native iTerm2
+# windows/tabs backed by a tmux server. Because tmux (not iTerm2) owns the
+# processes, they keep running when iTerm2 quits, the SSH link drops, or iTerm2
+# crashes. Reattaching (`tmux -CC attach`) restores the same windows/tabs/panes
+# with the agents still alive.
+#
+# This is NOT a broker replacement. It restores the *process + layout*; the
+# Tier 2 broker (#4) holds the durable *messages/handoff/state* a reattached
+# agent resumes from. tmux brings the agent back; the broker tells it where it
+# was. See RECOVERY.md and README.md for how the two compose.
+#
+# ---------------------------------------------------------------------------
+# SUBCOMMANDS
+# ---------------------------------------------------------------------------
+#   spawn   Start (or reattach, via `new-session -A`) a named tmux -CC session
+#           for an agent, cd into its dir, stamp identity via spawnterm-emit,
+#           optionally isolate it in a git worktree (#13), then run the agent
+#           command INSIDE the tmux session. Gated on `spawnterm.tmux`.
+#   attach  Reattach an existing tmux -CC session in a fresh iTerm2 tab
+#           (`tmux -CC attach -t <name>`). The recovery command. No identity
+#           re-stamp, no worktree work — the agent is already running.
+#   name    Print the deterministic, sanitized tmux session name derived from
+#           an agent's id/role/task. Pure, no side effects, never gated.
+#
+# ---------------------------------------------------------------------------
+# GATING
+# ---------------------------------------------------------------------------
+# `spawn` gates on the feature flag `spawnterm.tmux` (default OFF) via
+# spawnterm-flag, with the same fail-safe / --no-gate / SPAWNTERM_FORCE=1
+# convention as spawnterm-emit / spawnterm-spawn / spawnterm-worktree:
+#   * flag OFF / helper missing  => fail-safe: NO tmux wrapping. `spawn`
+#     delegates to the plain `spawnterm-spawn` flow (#10) unchanged.
+#   * flag ON (or --no-gate / SPAWNTERM_FORCE=1) => wrap the agent in tmux -CC.
+# `attach` and `name` are recovery/introspection and do not gate.
+#
+# No external deps beyond osascript + tmux (macOS/iTerm2 runtime deps) and the
+# sibling spawnterm-* helpers. --dry-run needs none of them.
+set -eu
+
+PROG="spawnterm-tmux"
+FLAG_KEY="spawnterm.tmux"
+
+# --- locate sibling helpers (absolute paths; they run in the new session) ----
+script_dir() {
+	d="$(dirname "$0")"
+	(cd "$d" 2>/dev/null && pwd)
+}
+
+find_sibling() {
+	# $1 = relative path under the repo (from this script's dir), $2 = PATH name.
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/$1" ]; then
+		d="$(cd "$sd/$(dirname "$1")" && pwd)"
+		printf '%s/%s' "$d" "$(basename "$1")"
+		return 0
+	fi
+	if command -v "$2" >/dev/null 2>&1; then
+		command -v "$2"
+		return 0
+	fi
+	return 1
+}
+
+find_spawn()    { find_sibling "../spawn/spawnterm-spawn"    spawnterm-spawn;    }
+find_emit()     { find_sibling "../emit/spawnterm-emit"      spawnterm-emit;     }
+find_worktree() { find_sibling "../spawn/spawnterm-worktree" spawnterm-worktree; }
+find_flag()     { find_sibling "../flags/spawnterm-flag"     spawnterm-flag;     }
+
+die() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	exit 2
+}
+
+usage() {
+	cat <<EOF
+$PROG — spawn/reattach an agent inside an iTerm2 \`tmux -CC\` session (Tier 3).
+
+Usage:
+  $PROG spawn  [options] [--] <command> [args...]
+  $PROG attach [--session <name> | --id <id> | --role <r> [--task <t>]] [--dry-run]
+  $PROG name   [--session <name> | --id <id> | --role <r> [--task <t>]]
+  $PROG -h | --help
+
+spawn — start (or reattach) a named tmux -CC session and run the agent in it.
+  Working directory (same as spawnterm-spawn):
+    (default)        Inherit the spawner's \$PWD.
+    --dir <path>     Open in a specific directory.
+    --home           Open in \$HOME.
+  Identity (stamped INSIDE the tmux session via spawnterm-emit):
+    --role <role>    agent_role   (also feeds the default badge).
+    --task <task>    agent_task   (also feeds the default badge).
+    --status <s>     agent_status + tab color: busy|blocked|done|idle (def busy).
+  Session:
+    --session <name> Explicit tmux session name (sanitized). Default: derived
+                     from --id, else <role>-<task>, else <role>/<task>.
+  Worktree + port isolation (#13, gated on spawnterm.worktree_isolation):
+    --id <id>        Agent id anchoring the isolation allocation + session name.
+    --base-port <n>  Base of the per-agent port range (default 41000).
+    --no-probe       Skip free-port probing; use the deterministic port as-is.
+  Gating / testing:
+    --no-gate        Bypass the spawnterm.tmux gate (and forward to emit/worktree).
+    --dry-run        Print the tmux -CC command + osascript that WOULD run; run
+                     nothing. (Also SPAWNTERM_TMUX_DRYRUN=1.)
+
+attach — reopen an existing tmux -CC session in a new iTerm2 tab (recovery).
+name   — print the derived, sanitized tmux session name and exit.
+
+Environment:
+  SPAWNTERM_TMUX_DRYRUN=1   Same as --dry-run.
+  SPAWNTERM_FORCE=1         Bypass the spawnterm.tmux gate (forwarded to emit).
+
+Gating: \`spawn\` gates on \`$FLAG_KEY\` (default OFF). When OFF, \`spawn\`
+delegates to spawnterm-spawn (no tmux wrapping) so behavior is exactly #10.
+
+Examples:
+  $PROG spawn --role worker --task "build #5" -- claude --dangerously-skip-permissions
+  $PROG spawn --id 5 --role worker --task tmux --no-gate -- claude   # force tmux
+  $PROG attach --id 5 --role worker --task tmux                      # after a crash
+  $PROG name --role worker --task "build #5"                         # -> st-worker-build-5
+EOF
+}
+
+# --- shell-quote a single argument (single-quote wrapping, POSIX-safe) --------
+shq() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# --- AppleScript string escape (backslash, then double-quote) -----------------
+as_esc() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# --- derive + sanitize a tmux session name ------------------------------------
+# tmux session names may not contain '.' or ':' (both are target-address
+# metacharacters). We go further and reduce to a safe, deterministic slug:
+# lowercased, every char outside [a-z0-9_-] -> '-', runs of '-' collapsed,
+# leading/trailing '-' trimmed, truncated to 40, and prefixed "st-" so all
+# spawnTerm sessions share a greppable namespace. Empty input -> "st-agent".
+# Deterministic: same inputs always yield byte-identical names, so a re-spawn
+# of the same agent lands on the same session (which `new-session -A` reattaches
+# rather than duplicating — collision-safe by construction).
+sanitize_name() {
+	slug="$(printf '%s' "$1" \
+		| tr '[:upper:]' '[:lower:]' \
+		| sed -e 's/[^a-z0-9_-]/-/g' -e 's/--*/-/g' -e 's/^-*//' -e 's/-*$//' \
+		| cut -c1-40 \
+		| sed -e 's/-*$//')"
+	if [ -z "$slug" ]; then
+		printf 'st-agent'
+	else
+		printf 'st-%s' "$slug"
+	fi
+}
+
+# Derive the raw (pre-sanitize) session basis from the SESSION/AGENT_ID/ROLE/TASK
+# globals set by the subcommand parser.
+derive_basis() {
+	if [ -n "$SESSION" ]; then printf '%s' "$SESSION"; return 0; fi
+	if [ -n "$AGENT_ID" ]; then printf '%s' "$AGENT_ID"; return 0; fi
+	if [ -n "$ROLE" ] && [ -n "$TASK" ]; then printf '%s-%s' "$ROLE" "$TASK"; return 0; fi
+	if [ -n "$ROLE" ]; then printf '%s' "$ROLE"; return 0; fi
+	if [ -n "$TASK" ]; then printf '%s' "$TASK"; return 0; fi
+	return 1
+}
+
+resolve_session_name() {
+	basis="$(derive_basis)" || die "cannot derive a session name (need --session, --id, --role, or --task)"
+	sanitize_name "$basis"
+}
+
+# --- build the AppleScript that opens a tab and runs one command line ---------
+# iTerm2 scripting model: create a tab in the current window (or a new window if
+# none is open), then `write text` a SINGLE command line into it. For the tmux
+# path that single line is the whole `tmux -CC ...` invocation (the agent setup
+# script is carried INSIDE it as a `sh -lc` argument on one physical line, so
+# `write text` does not submit it piecemeal at embedded newlines).
+build_applescript() {
+	body="$(as_esc "$1")"
+	cat <<APPLESCRIPT
+tell application "iTerm2"
+	if (count of windows) = 0 then
+		set targetWindow to (create window with default profile)
+	else
+		set targetWindow to current window
+		tell targetWindow to create tab with default profile
+	end if
+	tell current session of targetWindow
+		write text "${body}"
+	end tell
+end tell
+APPLESCRIPT
+}
+
+run_applescript() {
+	command -v osascript >/dev/null 2>&1 || die "osascript not found (this wrapper requires macOS/iTerm2)"
+	build_applescript "$1" | osascript -
+}
+
+# =============================================================================
+# subcommand: name
+# =============================================================================
+cmd_name() {
+	SESSION=""; AGENT_ID=""; ROLE=""; TASK=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--session) [ $# -ge 2 ] || die "--session requires a value"; SESSION="$2"; shift 2 ;;
+			--session=*) SESSION="${1#--session=}"; shift ;;
+			--id) [ $# -ge 2 ] || die "--id requires a value"; AGENT_ID="$2"; shift 2 ;;
+			--id=*) AGENT_ID="${1#--id=}"; shift ;;
+			--role) [ $# -ge 2 ] || die "--role requires a value"; ROLE="$2"; shift 2 ;;
+			--role=*) ROLE="${1#--role=}"; shift ;;
+			--task) [ $# -ge 2 ] || die "--task requires a value"; TASK="$2"; shift 2 ;;
+			--task=*) TASK="${1#--task=}"; shift ;;
+			-h|--help) usage; exit 0 ;;
+			*) die "unknown argument to 'name': $1" ;;
+		esac
+	done
+	resolve_session_name
+	printf '\n'
+}
+
+# =============================================================================
+# subcommand: attach  (recovery)
+# =============================================================================
+cmd_attach() {
+	SESSION=""; AGENT_ID=""; ROLE=""; TASK=""
+	DRYRUN="${SPAWNTERM_TMUX_DRYRUN:-0}"; [ "$DRYRUN" = "1" ] || DRYRUN=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--session) [ $# -ge 2 ] || die "--session requires a value"; SESSION="$2"; shift 2 ;;
+			--session=*) SESSION="${1#--session=}"; shift ;;
+			--id) [ $# -ge 2 ] || die "--id requires a value"; AGENT_ID="$2"; shift 2 ;;
+			--id=*) AGENT_ID="${1#--id=}"; shift ;;
+			--role) [ $# -ge 2 ] || die "--role requires a value"; ROLE="$2"; shift 2 ;;
+			--role=*) ROLE="${1#--role=}"; shift ;;
+			--task) [ $# -ge 2 ] || die "--task requires a value"; TASK="$2"; shift 2 ;;
+			--task=*) TASK="${1#--task=}"; shift ;;
+			--dry-run) DRYRUN=1; shift ;;
+			-h|--help) usage; exit 0 ;;
+			*) die "unknown argument to 'attach': $1" ;;
+		esac
+	done
+	NAME="$(resolve_session_name)"
+	# `tmux -CC attach` re-establishes iTerm2 native integration for the running
+	# session, restoring its windows/tabs/panes with the agents still alive.
+	TMUX_CMD="tmux -CC attach -t $(shq "$NAME")"
+	APPLESCRIPT_TEXT="$(build_applescript "$TMUX_CMD")"
+	if [ "$DRYRUN" = "1" ]; then
+		printf '%s: DRY RUN (nothing executed)\n' "$PROG"
+		printf '  action       : attach (recovery)\n'
+		printf '  session name : %s\n' "$NAME"
+		printf '  tmux command : %s\n' "$TMUX_CMD"
+		printf '\n  AppleScript that WOULD run:\n'
+		printf '%s\n' "$APPLESCRIPT_TEXT" | sed 's/^/    /'
+		exit 0
+	fi
+	run_applescript "$TMUX_CMD"
+}
+
+# =============================================================================
+# subcommand: spawn
+# =============================================================================
+# Globals set by the parser and consumed by the ON/OFF paths.
+DIR=""; USE_HOME=0; ROLE=""; TASK=""; STATUS="busy"
+SESSION=""; AGENT_ID=""; BASE_PORT=""; NO_PROBE=0; NO_GATE=0
+DRYRUN=0; RUN_CMD=""
+
+# fail-safe OFF: helper missing or flag not true => tmux disabled.
+tmux_gate_open() {
+	[ "${SPAWNTERM_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	fl="$(find_flag 2>/dev/null)" || return 1
+	"$fl" "$FLAG_KEY" >/dev/null 2>&1
+}
+
+# gate OFF: delegate to spawnterm-spawn (NO tmux wrapping, exactly #10). Called
+# with the trailing user command still in "$@".
+delegate_to_spawn() {
+	if ! SPAWN="$(find_spawn)"; then
+		die "spawnterm.tmux is OFF and spawnterm-spawn was not found to delegate to"
+	fi
+	# Build the arg vector by PREPENDING options ahead of `-- <command>`. Option
+	# order is irrelevant to spawn's parser, so prepend in any order; the command
+	# in "$@" is preserved untouched after the `--`.
+	set -- -- "$@"
+	[ "$DRYRUN" = "1" ]    && set -- --dry-run "$@"
+	[ "$NO_PROBE" = "1" ]  && set -- --no-probe "$@"
+	[ -n "$BASE_PORT" ]    && set -- --base-port "$BASE_PORT" "$@"
+	[ -n "$AGENT_ID" ]     && set -- --id "$AGENT_ID" "$@"
+	set -- --status "$STATUS" "$@"
+	[ -n "$TASK" ]         && set -- --task "$TASK" "$@"
+	[ -n "$ROLE" ]         && set -- --role "$ROLE" "$@"
+	[ "$USE_HOME" = "1" ]  && set -- --home "$@"
+	[ -n "$DIR" ]          && set -- --dir "$DIR" "$@"
+	if [ "$DRYRUN" = "1" ]; then
+		printf '%s: tmux disabled (%s OFF) -> delegating to spawnterm-spawn (no tmux wrapping)\n' "$PROG" "$FLAG_KEY"
+		printf '  delegate     : %s\n\n' "$SPAWN"
+	fi
+	exec "$SPAWN" "$@"
+}
+
+# gate ON: build + run (or print) the tmux -CC wrapping.
+run_tmux_path() {
+	NAME="$(resolve_session_name)"
+
+	# -- resolve working directory: --home > --dir > inherit $PWD --------------
+	if [ "$USE_HOME" = "1" ]; then CWD="$HOME"
+	elif [ -n "$DIR" ]; then CWD="$DIR"
+	else CWD="$PWD"; fi
+
+	# -- worktree + port/namespace isolation (#13), same as spawnterm-spawn ----
+	ISOLATION_ON=0; ISOLATION_PLAN=""; ISO_EXPORTS=""
+	iso_gate_open() {
+		[ "${SPAWNTERM_FORCE:-}" = "1" ] && return 0
+		[ "$NO_GATE" = "1" ] && return 0
+		fl2="$(find_flag 2>/dev/null)" || return 1
+		"$fl2" spawnterm.worktree_isolation >/dev/null 2>&1
+	}
+	if iso_gate_open; then
+		ISOLATION_ON=1
+		WT="$(find_worktree)" || die "worktree isolation is ON but spawnterm-worktree was not found"
+		REPO_ROOT="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)" \
+			|| die "worktree isolation is ON but $CWD is not inside a git repository"
+		iso_id="$AGENT_ID"
+		if [ -z "$iso_id" ]; then
+			if [ -n "$ROLE" ] && [ -n "$TASK" ]; then iso_id="$ROLE-$TASK"
+			elif [ -n "$ROLE" ]; then iso_id="$ROLE"
+			elif [ -n "$TASK" ]; then iso_id="$TASK"
+			else die "worktree isolation is ON but no --id (or --role/--task) to derive an agent id from"; fi
+		fi
+		set -- create --repo "$REPO_ROOT" --id "$iso_id"
+		[ -n "$ROLE" ] && set -- "$@" --role "$ROLE"
+		[ -n "$TASK" ] && set -- "$@" --task "$TASK"
+		[ -n "$BASE_PORT" ] && set -- "$@" --base-port "$BASE_PORT"
+		[ "$NO_PROBE" = "1" ] && set -- "$@" --no-probe
+		[ "$NO_GATE" = "1" ] && set -- "$@" --no-gate
+		[ "$DRYRUN" = "1" ] && set -- "$@" --dry-run
+		ISOLATION_PLAN="$("$WT" "$@")" || die "spawnterm-worktree create failed (see errors above)"
+		iso_val() { printf '%s\n' "$ISOLATION_PLAN" | sed -n "s/^$1=//p" | head -1; }
+		ISO_WORKTREE="$(iso_val worktree)"; ISO_PORT="$(iso_val port)"
+		ISO_NS="$(iso_val namespace)"; ISO_BRANCH="$(iso_val branch)"
+		[ -n "$ISO_WORKTREE" ] || die "spawnterm-worktree did not return a worktree path"
+		CWD="$ISO_WORKTREE"
+		# Single-line exports for the inner tmux script (`;`-joined below).
+		ISO_EXPORTS="export SPAWNTERM_PORT=$(shq "$ISO_PORT") ; export SPAWNTERM_NS=$(shq "$ISO_NS") ; export SPAWNTERM_WORKTREE=$(shq "$ISO_WORKTREE") ; export SPAWNTERM_BRANCH=$(shq "$ISO_BRANCH") ; "
+	fi
+
+	# -- locate emit + assemble identity emits (run INSIDE the tmux session) ---
+	EMIT="$(find_emit)" || die "cannot find spawnterm-emit (looked next to this script and on PATH)"
+	GATE_ARG=""; [ "$NO_GATE" = "1" ] && GATE_ARG=" --no-gate"
+	EMITS=""
+	add_emit() { EMITS="${EMITS}$(shq "$EMIT")${GATE_ARG} $* ; "; }
+	[ -n "$ROLE" ] && add_emit "role $(shq "$ROLE")"
+	[ -n "$TASK" ] && add_emit "task $(shq "$TASK")"
+	add_emit "status $(shq "$STATUS")"
+	add_emit "color $(shq "$STATUS")"
+	add_emit "badge"
+
+	# -- the inner session script: ONE physical line (`;`-joined) so iTerm2's
+	#    `write text` submits the whole `tmux -CC ...` invocation as a single
+	#    command. cd -> per-agent env exports -> identity emits -> exec agent.
+	INNER="cd $(shq "$CWD") ; ${ISO_EXPORTS}${EMITS}exec ${RUN_CMD}"
+
+	# -- the tmux -CC invocation. `new-session -A` = create-or-reattach: first
+	#    spawn creates the session and runs INNER; a later spawn of the same
+	#    agent (same session name) reattaches the still-running agent and INNER
+	#    is NOT re-run. That is the persistence/reattach contract.
+	TMUX_SHELL="${SHELL:-/bin/sh}"
+	TMUX_CMD="tmux -CC new-session -A -s $(shq "$NAME") $(shq "$TMUX_SHELL") -lc $(shq "$INNER")"
+
+	APPLESCRIPT_TEXT="$(build_applescript "$TMUX_CMD")"
+
+	if [ "$DRYRUN" = "1" ]; then
+		printf '%s: DRY RUN (nothing executed)\n' "$PROG"
+		printf '  action       : spawn under tmux -CC\n'
+		printf '  gate         : ON (%s)%s\n' "$FLAG_KEY" "$([ "$NO_GATE" = 1 ] && echo ' — bypassed via --no-gate/SPAWNTERM_FORCE' || echo '')"
+		printf '  session name : %s\n' "$NAME"
+		printf '  resolved cwd : %s\n' "$CWD"
+		printf '  emit helper  : %s\n' "$EMIT"
+		printf '  isolation    : %s\n' "$([ "$ISOLATION_ON" = 1 ] && echo 'ON (spawnterm.worktree_isolation) — per-agent worktree + port' || echo 'off (plain $PWD inheritance, = #10)')"
+		if [ "$ISOLATION_ON" = "1" ]; then
+			printf '\n  worktree isolation plan (from spawnterm-worktree):\n'
+			printf '%s\n' "$ISOLATION_PLAN" | sed 's/^/    /'
+		fi
+		printf '\n  inner session script (runs INSIDE tmux, one line):\n    %s\n' "$INNER"
+		printf '\n  tmux -CC command (typed into the launching iTerm2 tab):\n    %s\n' "$TMUX_CMD"
+		printf '\n  AppleScript that WOULD run:\n'
+		printf '%s\n' "$APPLESCRIPT_TEXT" | sed 's/^/    /'
+		exit 0
+	fi
+
+	run_applescript "$TMUX_CMD"
+}
+
+# Parse `spawn` options, then route to the tmux (gate ON) or delegate (gate OFF)
+# path. Parsing happens inline here so the trailing user command stays in "$@"
+# for delegation; the same command is also snapshotted into RUN_CMD (a single
+# shell-quoted string) for the inner tmux session script.
+dispatch_spawn() {
+	DIR=""; USE_HOME=0; ROLE=""; TASK=""; STATUS="busy"
+	SESSION=""; AGENT_ID=""; BASE_PORT=""; NO_PROBE=0; NO_GATE=0
+	DRYRUN="${SPAWNTERM_TMUX_DRYRUN:-0}"; [ "$DRYRUN" = "1" ] || DRYRUN=0
+	[ "${SPAWNTERM_FORCE:-}" = "1" ] && NO_GATE=1
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--dir) [ $# -ge 2 ] || die "--dir requires a <path> argument"; DIR="$2"; shift 2 ;;
+			--dir=*) DIR="${1#--dir=}"; shift ;;
+			--home) USE_HOME=1; shift ;;
+			--role) [ $# -ge 2 ] || die "--role requires a <role> argument"; ROLE="$2"; shift 2 ;;
+			--role=*) ROLE="${1#--role=}"; shift ;;
+			--task) [ $# -ge 2 ] || die "--task requires a <task> argument"; TASK="$2"; shift 2 ;;
+			--task=*) TASK="${1#--task=}"; shift ;;
+			--status) [ $# -ge 2 ] || die "--status requires a <status> argument"; STATUS="$2"; shift 2 ;;
+			--status=*) STATUS="${1#--status=}"; shift ;;
+			--session) [ $# -ge 2 ] || die "--session requires a value"; SESSION="$2"; shift 2 ;;
+			--session=*) SESSION="${1#--session=}"; shift ;;
+			--id) [ $# -ge 2 ] || die "--id requires an <id> argument"; AGENT_ID="$2"; shift 2 ;;
+			--id=*) AGENT_ID="${1#--id=}"; shift ;;
+			--base-port) [ $# -ge 2 ] || die "--base-port requires a value"; BASE_PORT="$2"; shift 2 ;;
+			--base-port=*) BASE_PORT="${1#--base-port=}"; shift ;;
+			--no-probe) NO_PROBE=1; shift ;;
+			--no-gate) NO_GATE=1; shift ;;
+			--dry-run) DRYRUN=1; shift ;;
+			-h|--help) usage; exit 0 ;;
+			--) shift; break ;;
+			-*) die "unknown option: $1 (try --help)" ;;
+			*) break ;;
+		esac
+	done
+	# Validate.
+	[ $# -ge 1 ] || { usage >&2; die "no command given — a command to run is required"; }
+	if [ "$USE_HOME" = "1" ] && [ -n "$DIR" ]; then
+		die "--home and --dir are mutually exclusive"
+	fi
+	case "$STATUS" in
+		busy|blocked|done|idle) ;;
+		*) die "unknown status: $STATUS (one of: busy, blocked, done, idle)" ;;
+	esac
+	# Snapshot the user command (still in "$@") for the inner tmux script.
+	RUN_CMD=""
+	for a in "$@"; do
+		if [ -z "$RUN_CMD" ]; then RUN_CMD="$(shq "$a")"; else RUN_CMD="$RUN_CMD $(shq "$a")"; fi
+	done
+
+	if tmux_gate_open; then
+		run_tmux_path
+	else
+		delegate_to_spawn "$@"
+	fi
+}
+
+# =============================================================================
+# dispatch
+# =============================================================================
+main() {
+	if [ $# -eq 0 ]; then
+		usage >&2
+		die "missing subcommand (spawn|attach|name)"
+	fi
+	sub="$1"; shift
+	case "$sub" in
+		-h|--help|help) usage; exit 0 ;;
+		spawn)  dispatch_spawn "$@" ;;
+		attach) cmd_attach "$@" ;;
+		name)   cmd_name "$@" ;;
+		*) die "unknown subcommand: $sub (one of: spawn, attach, name)" ;;
+	esac
+}
+
+main "$@"
