@@ -81,11 +81,20 @@ changes to iTerm2 source are made directly in this personal fork; never submitte
 - **Tier 3 (#5) ✅**: run agents under `tmux -CC`; API-over-tmux-CC validation shipped as a runnable harness + manual checklist, marked **UNVALIDATED** (needs a live iTerm2+tmux run — do it in the testing phase).
 - **Capabilities ✅**: #13 worktree+$PORT · #14 review surface · #15 janitor · #16 cost dashboard · #17 agent inbox · #18 MCP surface.
 
-## What remains
-Only **`scope:iterm2-core`** — edits iTerm2 source **directly in this fork** (never upstream); built + tested here:
-- **#6** Tier 4 core changes, decomposed: **#51** user-var sidecar (in progress) → **#50** queryable registry + labels · **#49** optional `async_send_text` delivery ack.
-- **#12** settings pane (AI-tab GUI to toggle the flags) — depends on #11 (done); after #6 (involves XIB editing).
-Plus the live tmux-CC API validation (#5's checklist) to run against a real iTerm2 in the test phase.
+## Status: CODE-COMPLETE ✅ (all of #2–#18, #23, #49–#51, #12 merged; only Epic #1 stays open as index)
+- **Tier 4 (#6) ✅ (fork-direct)**: #51 user-var sidecar · #49 `async_send_text` delivery ack · #50 queryable registry + labels. Proto regenerated; `ModernTests` added; gated/opt-in; never upstream.
+- **#12 settings pane ✅**: spawnTerm capability toggles in Settings → General → AI (programmatic checkboxes → `spawnterm-flag`, config.toml single source of truth).
+
+## Remaining = operator TEST PHASE (needs a real iTerm2 build; can't run in the dev sandbox)
+The external tooling has **614 pure unit tests green**. The iTerm2 **core** changes (#6, #12) were merged
+**review-only** — this environment can't compile iTerm2 (Xcode 26.2 vs prebuilt-deps 26.5; `make
+paranoid-deps` fails on libsixel; Metal toolchain + `CNoise` submodule missing). To verify on a real machine:
+1. `git submodule update --init --recursive`
+2. `make paranoid-deps` (needs Homebrew autotools for libsixel) and `xcodebuild -downloadComponent MetalToolchain`
+3. `tools/build.sh` (expect clean; fix any warning = error)
+4. `tools/run_tests.expect ModernTests/UserVarSidecarTests` · `.../iTermSendTextDispatchAggregatorTests` · `.../iTermSessionRegistryFilterTests`
+5. `make run`, then exercise the real flow: spawn with identity, status board colors/badge, broker send+ack, review surface, cost dashboard, MCP tools, and the **UNVALIDATED** tmux-CC Python-API checklist (`spawnterm/tmux/API_VALIDATION.md`).
+6. Enable capabilities via the new Settings → General → AI → spawnTerm pane (all default OFF).
 
 ## Flags in the schema (all default OFF)
 `spawnterm.status_board · worktree_isolation · messaging · agent_inbox · cost_dashboard · janitor · mcp · daemon · broker · review · tmux`
