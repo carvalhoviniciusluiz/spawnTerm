@@ -18,7 +18,7 @@
 //  Which user-vars become labels: only the spawnTerm agent-identity subset,
 //  i.e. user-vars whose (dot-free) name begins with "agent_" — for example
 //  user.agent_status, user.agent_role, user.agent_task, user.agent_id (set by
-//  spawnterm-emit). Other user-vars (git state, ad-hoc scripting values) are
+//  it2agent-emit). Other user-vars (git state, ad-hoc scripting values) are
 //  intentionally NOT exposed as labels so ListSessions stays a descriptive
 //  identity read model rather than a dump of every variable. Each surviving
 //  var becomes the tag "<name>=<value>" (e.g. "agent_status=running").

@@ -1,0 +1,66 @@
+[
+  {
+    "name": "it2agent: blocked → status",
+    "regex": "(?i)(\\bblocked\\b|waiting for (your )?(input|response|confirmation|approval)|awaiting (input|confirmation|approval)|needs? (your )?(input|approval|confirmation)|press (enter|return) to continue|\\[y/n\\]|\\(y/n\\))",
+    "action": "iTermSetUserVariableTrigger",
+    "parameter": "agent_status\u0001blocked",
+    "partial": true,
+    "disabled": false
+  },
+  {
+    "name": "it2agent: blocked → notify",
+    "regex": "(?i)(\\bblocked\\b|waiting for (your )?(input|response|confirmation|approval)|awaiting (input|confirmation|approval)|needs? (your )?(input|approval|confirmation)|press (enter|return) to continue|\\[y/n\\]|\\(y/n\\))",
+    "action": "iTermUserNotificationTrigger",
+    "parameter": "it2agent: agent is blocked / waiting for input",
+    "partial": true,
+    "disabled": false
+  },
+  {
+    "name": "it2agent: error → status",
+    "regex": "(?i)(\\bbuild (failed|error)\\b|\\btests? failed\\b|\\b\\d+ (tests?|specs?|examples?) (failed|failing)\\b|\\bfatal(:| error)\\b|^panic:|Traceback \\(most recent call last\\)|npm ERR!|\\bFAIL\\b|error\\[E\\d+\\])",
+    "action": "iTermSetUserVariableTrigger",
+    "parameter": "agent_status\u0001error",
+    "partial": false,
+    "disabled": false
+  },
+  {
+    "name": "it2agent: error → notify",
+    "regex": "(?i)(\\bbuild (failed|error)\\b|\\btests? failed\\b|\\b\\d+ (tests?|specs?|examples?) (failed|failing)\\b|\\bfatal(:| error)\\b|^panic:|Traceback \\(most recent call last\\)|npm ERR!|\\bFAIL\\b|error\\[E\\d+\\])",
+    "action": "iTermUserNotificationTrigger",
+    "parameter": "it2agent: agent hit a build/test error",
+    "partial": false,
+    "disabled": false
+  },
+  {
+    "name": "it2agent: PR opened → status",
+    "regex": "https?://github\\.com/[\\w.-]+/[\\w.-]+/pull/\\d+",
+    "action": "iTermSetUserVariableTrigger",
+    "parameter": "agent_status\u0001pr_open",
+    "partial": false,
+    "disabled": false
+  },
+  {
+    "name": "it2agent: PR opened → notify",
+    "regex": "https?://github\\.com/[\\w.-]+/[\\w.-]+/pull/\\d+",
+    "action": "iTermUserNotificationTrigger",
+    "parameter": "it2agent: PR opened",
+    "partial": false,
+    "disabled": false
+  },
+  {
+    "name": "it2agent: done → status",
+    "regex": "(?i)(\\ball tests? (pass|passed|passing)\\b|\\btask (complete|completed|done)\\b|\\b(build )?succeeded\\b|\\bcompleted successfully\\b|\\bdone\\b[.!]?$|✅|🎉)",
+    "action": "iTermSetUserVariableTrigger",
+    "parameter": "agent_status\u0001done",
+    "partial": false,
+    "disabled": false
+  },
+  {
+    "name": "it2agent: done → notify",
+    "regex": "(?i)(\\ball tests? (pass|passed|passing)\\b|\\btask (complete|completed|done)\\b|\\b(build )?succeeded\\b|\\bcompleted successfully\\b|\\bdone\\b[.!]?$|✅|🎉)",
+    "action": "iTermUserNotificationTrigger",
+    "parameter": "it2agent: agent finished (done)",
+    "partial": false,
+    "disabled": false
+  }
+]

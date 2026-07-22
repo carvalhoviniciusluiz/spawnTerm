@@ -1302,7 +1302,7 @@ CA
                 <outlet property="_aiFeatureHostedFileSearch" destination="VZa-XN-uW4" id="0rR-Nt-shY"/>
                 <outlet property="_aiFeatureHostedWebSearch" destination="MCS-Bt-6lD" id="Iho-vf-eeE"/>
                 <outlet property="_aiFeatureStreamingResponses" destination="YS9-fE-xko" id="aBq-O8-kJy"/>
-                <outlet property="_spawnTermCapabilitiesView" destination="Spn-Tc-vew" id="Spn-Tc-out"/>
+                <outlet property="_agentCapabilitiesView" destination="Spn-Tc-vew" id="Spn-Tc-out"/>
                 <outlet property="_aiModel" destination="mTj-eb-v1b" id="PLv-B3-Ios"/>
                 <outlet property="_aiModelLabel" destination="P9E-Ju-OfU" id="INC-hA-t0G"/>
                 <outlet property="_aiPluginLabel" destination="jc2-ao-oIw" id="gIa-Ux-eQS"/>
@@ -7725,7 +7725,7 @@ See the [documentation](https://iterm2.com/automatic-profile-switching.html) for
                                                             </subviews>
                                                         </view>
                                                     </tabViewItem>
-                                                    <tabViewItem label="spawnTerm" identifier="" id="Spn-Tm-tab">
+                                                    <tabViewItem label="AI Agents" identifier="" id="Spn-Tm-tab">
                                                         <view key="view" id="Spn-Tc-vew">
                                                             <rect key="frame" x="10" y="33" width="651" height="291"/>
                                                             <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>

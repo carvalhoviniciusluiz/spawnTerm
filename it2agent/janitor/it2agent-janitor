@@ -1,0 +1,659 @@
+#!/usr/bin/env sh
+# it2agent-janitor — verification/merge gate for it2agent agents.
+#
+# it2agent Phase 3 (#15). scope:external-tooling — glue that shells out to
+# `git`, the #13 worktree allocator, and the #11 flag helper, and RUNS the
+# project's own gate commands. It never modifies iTerm2 source.
+#
+# THE MERGE GATE. Parallel agents multiply the odds that an unverified merge
+# compounds bugs. Before an agent's branch is mergeable, a janitor runs the
+# PROJECT'S OWN verification gate (lint + typecheck + tests) inside that agent's
+# worktree, reports pass/fail per check, and BLOCKS (non-zero exit) on any
+# failure. #14's `approve` (or any auto-merge flow) consults `check` first and
+# only merges when it exits 0.
+#
+# ---------------------------------------------------------------------------
+# GATE DISCOVERY (pure) — subcommand `config`
+# ---------------------------------------------------------------------------
+# The checks are CONFIGURABLE PER PROJECT; no ecosystem is hardcoded. Precedence
+# (first hit wins):
+#   1. --config <file>              explicit TOML with a [gate] table.
+#   2. $IT2AGENT_GATE_CONFIG        same, from the environment.
+#   3. <repo>/.it2agent/gate.toml   repo-local TOML [gate] table.
+#   4. <repo>/it2agent-gate.sh      repo-local script; the WHOLE gate is that
+#                                    one executable (one check named "gate").
+#   5. AUTO-DETECT (fallback):       npm scripts (package.json) ->
+#                                    Makefile targets -> python tools
+#                                    (ruff/mypy/pytest). Only present ones are
+#                                    emitted. Explicit config ALWAYS overrides.
+# A [gate] table maps a check name to its shell command, e.g.
+#   [gate]
+#   lint = "npm run lint"
+#   typecheck = "npm run typecheck"
+#   test = "npm test"
+# Arbitrary check names are allowed; file order is preserved. An empty gate
+# (nothing configured or detected) verifies nothing: `check` warns and exits 0.
+#
+# ---------------------------------------------------------------------------
+# THE GATE RUN (side-effecting, gated) — subcommand `check`
+# ---------------------------------------------------------------------------
+# Resolve the agent's worktree via #13 (id+role) OR an explicit --worktree, then
+# run each gate command with CWD = the worktree. Per-check status is captured;
+# failing output is written to <worktree>/.it2agent-janitor/<check>.log AND
+# echoed to stdout so the #14 review surface can show it. A machine-readable
+# summary (per-check status + overall) is printed to stdout and saved to
+# <worktree>/.it2agent-janitor/summary.txt.
+#   exit 0  overall=ok    (all checks passed) or overall=empty (no gate)
+#   exit 1  overall=blocked (>=1 check failed) — do NOT merge
+#   exit 2  usage / resolution error
+# --dry-run prints the exact `(cd <worktree> && <cmd>)` lines; executes nothing.
+#
+# ---------------------------------------------------------------------------
+# FILE-LEVEL OWNERSHIP (optional, pure-ish) — subcommand `owns`
+# ---------------------------------------------------------------------------
+# To enable conflict-free auto-merge, an ownership map (path-glob -> agent) can
+# declare which files an agent may touch. `owns` reports whether the agent's
+# diff (base...branch, or an explicit --files list) stays entirely within the
+# globs it owns; if so the change is eligible for auto-merge.
+#   [ownership]
+#   "src/api/**" = "backend"
+#   "docs/**"    = "docs-bot"
+# Globs use shell `case` semantics: `*` (and `**`, normalized to `*`) match
+# across `/`. Map precedence mirrors the gate config (--map / default
+# <repo>/.it2agent/ownership.toml). Optional and self-contained.
+#   exit 0  eligible (every changed file is owned; diff non-empty)
+#   exit 1  NOT eligible (a changed file is unowned, or the diff is empty)
+#
+# Gating: `check` self-gates on `agent.janitor` via `it2agent-flag`
+# (fail-safe: flag absent / helper missing => OFF => no-op, exit 0), bypassable
+# with --no-gate or IT2AGENT_FORCE=1 (matching emit / spawn / worktree /
+# review). `config`, `resolve`, and `owns` are pure and never gate.
+#
+# No external deps beyond `git` and the optional sibling `it2agent-worktree` /
+# `it2agent-flag`. The gate COMMANDS themselves are project-provided.
+set -eu
+
+PROG="it2agent-janitor"
+FLAG_KEY="agent.janitor"
+STATE_DIR=".it2agent-janitor"
+
+die() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	exit 2
+}
+
+warn() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+}
+
+# --- locate siblings (absolute) ----------------------------------------------
+script_dir() {
+	d="$(dirname "$0")"
+	(cd "$d" 2>/dev/null && pwd)
+}
+
+find_worktree_helper() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/../spawn/it2agent-worktree" ]; then
+		wd="$(cd "$sd/../spawn" && pwd)"
+		printf '%s/it2agent-worktree' "$wd"
+		return 0
+	fi
+	if command -v it2agent-worktree >/dev/null 2>&1; then
+		command -v it2agent-worktree
+		return 0
+	fi
+	return 1
+}
+
+find_flag() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/../flags/it2agent-flag" ]; then
+		fd="$(cd "$sd/../flags" && pwd)"
+		printf '%s/it2agent-flag' "$fd"
+		return 0
+	fi
+	if command -v it2agent-flag >/dev/null 2>&1; then
+		command -v it2agent-flag
+		return 0
+	fi
+	return 1
+}
+
+# gate_open: 0 (ON / bypassed) or 1 (OFF). Fail-safe OFF when the flag helper is
+# missing or the flag is not set true.
+gate_open() {
+	[ "${IT2AGENT_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	flag="$(find_flag 2>/dev/null)" || return 1
+	if "$flag" "$FLAG_KEY" >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+# --- pure helpers ------------------------------------------------------------
+canon_dir() {
+	(cd "$1" 2>/dev/null && pwd -P)
+}
+
+resolve_repo() {
+	base="${1:-$PWD}"
+	[ -d "$base" ] || die "not a directory: $base"
+	top="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" \
+		|| die "not inside a git repository: $base"
+	REPO_ROOT="$(canon_dir "$top")"
+}
+
+# detect_base: default merge target. Prefer remote HEAD, then local main/master,
+# then the repo's current branch. Consistent with #13 cleanup / #14 review.
+detect_base() {
+	b="$(git -C "$REPO_ROOT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+	if [ -n "$b" ] && git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$b"; then
+		printf '%s' "$b"; return 0
+	fi
+	for cand in main master; do
+		if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$cand"; then
+			printf '%s' "$cand"; return 0
+		fi
+	done
+	git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null
+}
+
+# val KEY TEXT -> value of a `KEY=...` line (parses #13 plan output).
+val() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -1; }
+
+# resolve_target: sets BRANCH, WORKTREE (reusing #13 for id+role unless the
+# caller gave --branch/--worktree explicitly) and BASE. Pure (plan is pure).
+# $1 = 1 to require a worktree path (check needs it); 0 to allow branch-only.
+resolve_target() {
+	if [ -n "$BRANCH_ARG" ]; then BRANCH="$BRANCH_ARG"; fi
+	if [ -n "$WORKTREE_ARG" ]; then
+		WORKTREE="$(canon_dir "$WORKTREE_ARG" 2>/dev/null || printf '%s' "$WORKTREE_ARG")"
+	fi
+
+	if [ -z "${BRANCH:-}" ] || [ -z "${WORKTREE:-}" ]; then
+		[ -n "$AGENT_ID" ] || die "specify an agent id (to reuse the #13 allocator) or pass --worktree/--branch"
+		wt_helper="$(find_worktree_helper)" || die "cannot find it2agent-worktree (needed to resolve the agent's branch/worktree)"
+		set -- plan --repo "$REPO_ROOT" --id "$AGENT_ID"
+		[ -n "$ROLE" ] && set -- "$@" --role "$ROLE"
+		plan_out="$(sh "$wt_helper" "$@")" || die "it2agent-worktree plan failed for id '$AGENT_ID'"
+		[ -n "${BRANCH:-}" ] || BRANCH="$(val branch "$plan_out")"
+		[ -n "${WORKTREE:-}" ] || WORKTREE="$(val worktree "$plan_out")"
+	fi
+
+	[ -n "${WORKTREE:-}" ] || die "could not resolve a worktree for the target"
+	BASE="$BASE_ARG"
+	[ -n "$BASE" ] || BASE="$(detect_base)"
+}
+
+# ==========================================================================
+# GATE CONFIG DISCOVERY (pure). Populates CHECK_NAMES / CHECK_CMD_<i> and
+# GATE_SOURCE. Uses newline-delimited accumulation to preserve order.
+# ==========================================================================
+# gate_config_path: echo the config file to parse, or empty for none.
+gate_config_path() {
+	if [ -n "$CONFIG_ARG" ]; then
+		[ -f "$CONFIG_ARG" ] || die "config file not found: $CONFIG_ARG"
+		printf '%s' "$CONFIG_ARG"; return 0
+	fi
+	if [ -n "${IT2AGENT_GATE_CONFIG:-}" ] && [ -f "${IT2AGENT_GATE_CONFIG:-}" ]; then
+		printf '%s' "$IT2AGENT_GATE_CONFIG"; return 0
+	fi
+	if [ -f "$REPO_ROOT/.it2agent/gate.toml" ]; then
+		printf '%s/.it2agent/gate.toml' "$REPO_ROOT"; return 0
+	fi
+	return 0
+}
+
+# parse_gate_toml FILE: extract the [gate] table's `name = "cmd"` lines in file
+# order into the global CHECKS newline list ("name<TAB>cmd" per line).
+parse_gate_toml() {
+	file="$1"
+	CHECKS=""
+	in_table=0
+	# Read line by line; a bracketed header switches sections.
+	while IFS= read -r line || [ -n "$line" ]; do
+		# Strip a trailing comment that is not inside quotes (best-effort: only
+		# when a '#' follows whitespace and no quote precedes it on the line).
+		trimmed="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+		case "$trimmed" in
+			'' | '#'*) continue ;;
+			'['*']')
+				case "$trimmed" in
+					'[gate]') in_table=1 ;;
+					*) in_table=0 ;;
+				esac
+				continue ;;
+		esac
+		[ "$in_table" = "1" ] || continue
+		# name = "cmd"  (value may be single- or double-quoted, or bare).
+		name="$(printf '%s' "$trimmed" | sed -E 's/^"?([A-Za-z0-9_.-]+)"?[[:space:]]*=.*/\1/')"
+		cmd="$(printf '%s' "$trimmed" | sed -E 's/^[^=]*=[[:space:]]*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')"
+		[ -n "$name" ] || continue
+		CHECKS="$CHECKS$name	$cmd
+"
+	done < "$file"
+}
+
+# has_npm_script NAME: 0 if package.json declares a "NAME" script (heuristic).
+has_npm_script() {
+	grep -Eq "\"$1\"[[:space:]]*:" "$REPO_ROOT/package.json" 2>/dev/null
+}
+
+# has_make_target NAME: 0 if the Makefile declares a NAME: target.
+has_make_target() {
+	[ -f "$REPO_ROOT/Makefile" ] || return 1
+	grep -Eq "^$1[[:space:]]*:" "$REPO_ROOT/Makefile" 2>/dev/null
+}
+
+# autodetect_gate: build CHECKS from the first ecosystem that matches. Only
+# checks that actually exist are emitted; nothing is invented.
+autodetect_gate() {
+	CHECKS=""
+	# 1) Node / npm scripts.
+	if [ -f "$REPO_ROOT/package.json" ]; then
+		has_npm_script lint       && CHECKS="${CHECKS}lint	npm run lint
+"
+		if has_npm_script typecheck; then CHECKS="${CHECKS}typecheck	npm run typecheck
+"
+		elif has_npm_script type-check; then CHECKS="${CHECKS}typecheck	npm run type-check
+"; fi
+		has_npm_script test       && CHECKS="${CHECKS}test	npm test
+"
+		[ -n "$CHECKS" ] && { GATE_SOURCE="auto:npm"; return 0; }
+	fi
+	# 2) Makefile targets.
+	if [ -f "$REPO_ROOT/Makefile" ]; then
+		has_make_target lint      && CHECKS="${CHECKS}lint	make lint
+"
+		has_make_target typecheck && CHECKS="${CHECKS}typecheck	make typecheck
+"
+		has_make_target test      && CHECKS="${CHECKS}test	make test
+"
+		[ -n "$CHECKS" ] && { GATE_SOURCE="auto:make"; return 0; }
+	fi
+	# 3) Python tooling (ruff / mypy / pytest), when the project looks pythonic.
+	if [ -f "$REPO_ROOT/pyproject.toml" ] || [ -f "$REPO_ROOT/setup.cfg" ] \
+		|| [ -f "$REPO_ROOT/setup.py" ] || ls "$REPO_ROOT"/*.py >/dev/null 2>&1; then
+		command -v ruff   >/dev/null 2>&1 && CHECKS="${CHECKS}lint	ruff check .
+"
+		command -v mypy   >/dev/null 2>&1 && CHECKS="${CHECKS}typecheck	mypy .
+"
+		command -v pytest >/dev/null 2>&1 && CHECKS="${CHECKS}test	pytest
+"
+		[ -n "$CHECKS" ] && { GATE_SOURCE="auto:python"; return 0; }
+	fi
+	GATE_SOURCE="none"
+	return 0
+}
+
+# discover_gate: fill CHECKS + GATE_SOURCE per the documented precedence.
+discover_gate() {
+	CHECKS=""
+	GATE_SOURCE=""
+	cfg="$(gate_config_path)"
+	if [ -n "$cfg" ]; then
+		parse_gate_toml "$cfg"
+		if [ -n "$CHECKS" ]; then GATE_SOURCE="config:$cfg"; return 0; fi
+		# A present-but-empty [gate] table is still an explicit (empty) gate.
+		GATE_SOURCE="config:$cfg"; return 0
+	fi
+	if [ -x "$REPO_ROOT/it2agent-gate.sh" ]; then
+		CHECKS="gate	$REPO_ROOT/it2agent-gate.sh
+"
+		GATE_SOURCE="script:$REPO_ROOT/it2agent-gate.sh"
+		return 0
+	fi
+	autodetect_gate
+}
+
+# --- config subcommand (pure) ------------------------------------------------
+cmd_config() {
+	discover_gate
+	printf 'repo=%s\n' "$REPO_ROOT"
+	printf 'gate-source=%s\n' "$GATE_SOURCE"
+	n=0
+	printf '%s' "$CHECKS" | while IFS='	' read -r name cmd; do
+		[ -n "$name" ] || continue
+		printf 'check=%s cmd=%s\n' "$name" "$cmd"
+	done
+	# Count without a subshell side-effect (the while above runs in a pipe).
+	n="$(printf '%s' "$CHECKS" | grep -c '	' 2>/dev/null || echo 0)"
+	printf 'checks=%s\n' "$n"
+}
+
+# --- check subcommand (side-effecting, gated) --------------------------------
+cmd_check() {
+	resolve_target 1
+	discover_gate
+
+	if [ "$DRYRUN" = "1" ]; then
+		printf 'repo=%s\n' "$REPO_ROOT"
+		printf 'worktree=%s\n' "$WORKTREE"
+		printf 'branch=%s\n' "${BRANCH:-<unresolved>}"
+		printf 'gate-source=%s\n' "$GATE_SOURCE"
+		if [ -z "$CHECKS" ]; then
+			printf 'overall=empty\n'
+			printf 'would-run: (no gate configured; nothing to run)\n'
+			return 0
+		fi
+		printf '%s' "$CHECKS" | while IFS='	' read -r name cmd; do
+			[ -n "$name" ] || continue
+			printf 'would-run: (cd %s && %s)   [check: %s]\n' "$WORKTREE" "$cmd" "$name"
+		done
+		printf 'would-run: write summary to %s/%s/summary.txt\n' "$WORKTREE" "$STATE_DIR"
+		return 0
+	fi
+
+	[ -d "$WORKTREE" ] || die "worktree does not exist: $WORKTREE (create it with it2agent-worktree)"
+
+	sdir="$WORKTREE/$STATE_DIR"
+	mkdir -p "$sdir" || die "cannot create state dir: $sdir"
+	summary="$sdir/summary.txt"
+	: > "$summary"
+
+	emit() { printf '%s\n' "$1"; printf '%s\n' "$1" >> "$summary"; }
+
+	emit "repo=$REPO_ROOT"
+	emit "worktree=$WORKTREE"
+	emit "branch=${BRANCH:-<unresolved>}"
+	emit "gate-source=$GATE_SOURCE"
+
+	if [ -z "$CHECKS" ]; then
+		warn "no gate configured or detected for $REPO_ROOT; nothing verified"
+		emit "overall=empty"
+		return 0
+	fi
+
+	failed=0
+	# Write the check list to a temp file so the run loop is NOT in a subshell
+	# (a pipe subshell would lose the failed counter).
+	list="$sdir/.checks.tmp"
+	printf '%s' "$CHECKS" > "$list"
+	while IFS='	' read -r name cmd; do
+		[ -n "$name" ] || continue
+		log="$sdir/$name.log"
+		if ( cd "$WORKTREE" && sh -c "$cmd" ) >"$log" 2>&1; then
+			emit "check=$name status=pass"
+		else
+			rc=$?
+			failed=$((failed + 1))
+			emit "check=$name status=fail exit=$rc log=$log"
+			# Surface the failing output to stdout for the #14 review surface.
+			printf -- '----- FAILED: %s (exit %s) -----\n' "$name" "$rc"
+			cat "$log"
+			printf -- '----- end %s -----\n' "$name"
+		fi
+	done < "$list"
+	rm -f "$list"
+
+	if [ "$failed" -gt 0 ]; then
+		emit "overall=blocked"
+		warn "$failed check(s) failed; branch ${BRANCH:-<unresolved>} is NOT mergeable"
+		return 1
+	fi
+	emit "overall=ok"
+	return 0
+}
+
+# ==========================================================================
+# FILE-LEVEL OWNERSHIP (optional, pure-ish).
+# ==========================================================================
+ownership_map_path() {
+	if [ -n "$MAP_ARG" ]; then
+		[ -f "$MAP_ARG" ] || die "ownership map not found: $MAP_ARG"
+		printf '%s' "$MAP_ARG"; return 0
+	fi
+	if [ -f "$REPO_ROOT/.it2agent/ownership.toml" ]; then
+		printf '%s/.it2agent/ownership.toml' "$REPO_ROOT"; return 0
+	fi
+	return 0
+}
+
+# owned_globs FILE OWNER: echo (newline-separated) every glob whose value equals
+# OWNER within the [ownership] table.
+owned_globs() {
+	file="$1"; owner="$2"
+	in_table=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		trimmed="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+		case "$trimmed" in
+			'' | '#'*) continue ;;
+			'['*']')
+				case "$trimmed" in
+					'[ownership]') in_table=1 ;;
+					*) in_table=0 ;;
+				esac
+				continue ;;
+		esac
+		[ "$in_table" = "1" ] || continue
+		glob="$(printf '%s' "$trimmed" | sed -E 's/[[:space:]]*=.*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')"
+		val_owner="$(printf '%s' "$trimmed" | sed -E 's/^[^=]*=[[:space:]]*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')"
+		[ "$val_owner" = "$owner" ] || continue
+		printf '%s\n' "$glob"
+	done < "$file"
+}
+
+# path_owned PATH GLOBS: 0 if PATH matches any glob (shell case semantics; `**`
+# normalized to `*`). GLOBS is a newline-separated list.
+path_owned() {
+	p="$1"; globs="$2"
+	oldifs="$IFS"; IFS='
+'
+	for g in $globs; do
+		[ -n "$g" ] || continue
+		ng="$(printf '%s' "$g" | sed 's/\*\*/*/g')"
+		# shellcheck disable=SC2254
+		case "$p" in
+			$ng) IFS="$oldifs"; return 0 ;;
+		esac
+	done
+	IFS="$oldifs"
+	return 1
+}
+
+cmd_owns() {
+	owner="$AGENT_ID"
+	[ -n "$owner" ] || die "owns needs an agent id (the owner key in the ownership map)"
+
+	mapfile="$(ownership_map_path)"
+	[ -n "$mapfile" ] || die "no ownership map (pass --map or create <repo>/.it2agent/ownership.toml)"
+	globs="$(owned_globs "$mapfile" "$owner")"
+
+	# Changed files: explicit --files (even when empty), else diff base...branch.
+	if [ "$FILES_SET" = "1" ]; then
+		changed="$(printf '%s' "$FILES_ARG" | tr ' ' '\n' | sed '/^$/d')"
+	else
+		resolve_target 0
+		[ -n "${BRANCH:-}" ] || die "cannot resolve a branch for the diff (pass --files or --branch)"
+		changed="$(git -C "$REPO_ROOT" diff --name-only "$BASE...$BRANCH" 2>/dev/null)" \
+			|| die "git diff failed for $BASE...$BRANCH"
+	fi
+
+	printf 'agent=%s\n' "$owner"
+	printf 'map=%s\n' "$mapfile"
+	[ -n "${BRANCH:-}" ] && printf 'branch=%s\n' "$BRANCH"
+	[ -n "${BASE:-}" ] && printf 'base=%s\n' "$BASE"
+	og="$(printf '%s' "$globs" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+	printf 'owned-globs=%s\n' "$og"
+
+	nchanged=0; unowned=""
+	oldifs="$IFS"; IFS='
+'
+	for f in $changed; do
+		[ -n "$f" ] || continue
+		nchanged=$((nchanged + 1))
+		if ! path_owned "$f" "$globs"; then
+			unowned="$unowned $f"
+		fi
+	done
+	IFS="$oldifs"
+	printf 'changed-files=%s\n' "$nchanged"
+
+	if [ "$nchanged" = "0" ]; then
+		printf 'eligible=no\n'
+		warn "empty diff: nothing to auto-merge"
+		return 1
+	fi
+	if [ -n "$unowned" ]; then
+		printf 'unowned=%s\n' "$(printf '%s' "$unowned" | sed 's/^ //')"
+		printf 'eligible=no\n'
+		return 1
+	fi
+	printf 'eligible=yes\n'
+	return 0
+}
+
+# --- resolve subcommand (pure) -----------------------------------------------
+cmd_resolve() {
+	resolve_target 0
+	printf 'agent=%s\n' "${AGENT_ID:-<explicit>}"
+	printf 'role=%s\n' "${ROLE:-}"
+	printf 'branch=%s\n' "${BRANCH:-}"
+	printf 'worktree=%s\n' "${WORKTREE:-}"
+	printf 'base=%s\n' "${BASE:-}"
+	printf 'repo=%s\n' "$REPO_ROOT"
+}
+
+usage() {
+	cat <<EOF
+$PROG — verification/merge gate: run the project's lint+typecheck+test gate in
+an agent's worktree and block the merge on failure. it2agent #15.
+Gated on $FLAG_KEY (default OFF).
+
+Usage:
+  $PROG <command> [<agent-id>] [options]
+
+Commands:
+  config           Print the resolved gate (source + per-check commands) for the
+                   repo. Pure, no side effects, no gate.
+  check            Run every gate check in the agent's worktree; report pass/fail
+                   per check and BLOCK (exit 1) on any failure. Gated.
+                   --dry-run prints the exact commands. exit 0=ok/empty, 1=blocked.
+  owns             Report whether the agent's diff stays within the files it owns
+                   (eligible for auto-merge). Pure-ish, no gate. exit 0=eligible.
+  resolve          Print the resolved target (branch/worktree/base) via #13.
+                   Pure, no gate.
+  -h, --help       Show this help.
+
+Target resolution (reuses #13):
+  <agent-id>          Positional agent id (or --id); reused with the #13
+                      allocator to derive the SAME branch + worktree.
+  --id <id>           Agent id (alternative to the positional form).
+  --role <role>       Agent role (feeds the #13 slug so resolution matches).
+  --branch <ref>      Explicit branch (skips allocator derivation).
+  --worktree <dir>    Explicit worktree path (skips allocator derivation).
+  --base <ref>        Base for the ownership diff (default: auto-detect
+                      origin/HEAD, then main/master, then current branch).
+  --repo <dir>        Repo to operate on (default: \$PWD).
+
+config / check options:
+  --config <file>     Explicit gate TOML (a [gate] table). Overrides discovery.
+
+check options:
+  --dry-run           Print the commands it WOULD run; execute nothing.
+  --no-gate           Bypass the $FLAG_KEY gate (local testing).
+
+owns options:
+  --map <file>        Ownership TOML (an [ownership] table). Default:
+                      <repo>/.it2agent/ownership.toml.
+  --files "<a b c>"   Explicit changed-file list (skips the git diff; makes the
+                      ownership predicate testable in isolation).
+
+Environment:
+  IT2AGENT_GATE_CONFIG   Path to a gate TOML (precedence below repo-local).
+  IT2AGENT_FORCE=1       Bypass the feature-flag gate (like --no-gate).
+
+Gate discovery precedence:
+  --config > \$IT2AGENT_GATE_CONFIG > <repo>/.it2agent/gate.toml >
+  <repo>/it2agent-gate.sh > auto-detect (npm scripts / Makefile / python tools).
+
+Gating: check acts only when "$FLAG_KEY" is ON (checked via it2agent-flag).
+When OFF it no-ops and exits 0 (fail-safe). config/owns/resolve never gate.
+
+Gate format, check contract, ownership auto-merge, and #13/#14 interop:
+it2agent/janitor/README.md
+EOF
+}
+
+# --- parse -------------------------------------------------------------------
+[ $# -ge 1 ] || { usage >&2; die "no command given"; }
+
+CMD="$1"; shift
+case "$CMD" in
+	-h|--help|help) usage; exit 0 ;;
+	config|check|owns|resolve) ;;
+	*) die "unknown command: $CMD (try --help)" ;;
+esac
+
+REPO_ARG=""
+AGENT_ID=""
+ROLE=""
+BRANCH_ARG=""
+WORKTREE_ARG=""
+BASE_ARG=""
+CONFIG_ARG=""
+MAP_ARG=""
+FILES_ARG=""
+FILES_SET=0
+DRYRUN=0
+NO_GATE=0
+
+[ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--repo) [ $# -ge 2 ] || die "--repo requires a <dir>"; REPO_ARG="$2"; shift 2 ;;
+		--repo=*) REPO_ARG="${1#--repo=}"; shift ;;
+		--id) [ $# -ge 2 ] || die "--id requires an <id>"; AGENT_ID="$2"; shift 2 ;;
+		--id=*) AGENT_ID="${1#--id=}"; shift ;;
+		--role) [ $# -ge 2 ] || die "--role requires a <role>"; ROLE="$2"; shift 2 ;;
+		--role=*) ROLE="${1#--role=}"; shift ;;
+		--branch) [ $# -ge 2 ] || die "--branch requires a <ref>"; BRANCH_ARG="$2"; shift 2 ;;
+		--branch=*) BRANCH_ARG="${1#--branch=}"; shift ;;
+		--worktree) [ $# -ge 2 ] || die "--worktree requires a <dir>"; WORKTREE_ARG="$2"; shift 2 ;;
+		--worktree=*) WORKTREE_ARG="${1#--worktree=}"; shift ;;
+		--base) [ $# -ge 2 ] || die "--base requires a <ref>"; BASE_ARG="$2"; shift 2 ;;
+		--base=*) BASE_ARG="${1#--base=}"; shift ;;
+		--config) [ $# -ge 2 ] || die "--config requires a <file>"; CONFIG_ARG="$2"; shift 2 ;;
+		--config=*) CONFIG_ARG="${1#--config=}"; shift ;;
+		--map) [ $# -ge 2 ] || die "--map requires a <file>"; MAP_ARG="$2"; shift 2 ;;
+		--map=*) MAP_ARG="${1#--map=}"; shift ;;
+		--files) [ $# -ge 2 ] || die "--files requires a value"; FILES_ARG="$2"; FILES_SET=1; shift 2 ;;
+		--files=*) FILES_ARG="${1#--files=}"; FILES_SET=1; shift ;;
+		--dry-run) DRYRUN=1; shift ;;
+		--no-gate) NO_GATE=1; shift ;;
+		-h|--help) usage; exit 0 ;;
+		--) shift; break ;;
+		-*) die "unknown option: $1 (try --help)" ;;
+		*)
+			if [ -z "$AGENT_ID" ]; then
+				AGENT_ID="$1"
+			else
+				die "unexpected argument: $1 (try --help)"
+			fi
+			shift ;;
+	esac
+done
+
+resolve_repo "$REPO_ARG"
+
+case "$CMD" in
+	config)
+		cmd_config
+		;;
+	resolve)
+		cmd_resolve
+		;;
+	owns)
+		cmd_owns
+		;;
+	check)
+		if ! gate_open; then
+			warn "feature '$FLAG_KEY' is disabled; no gate run (enable with: it2agent-flag enable $FLAG_KEY)"
+			exit 0
+		fi
+		cmd_check
+		;;
+esac

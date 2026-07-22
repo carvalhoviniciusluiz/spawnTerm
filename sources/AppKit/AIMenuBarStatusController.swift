@@ -3,9 +3,9 @@ import Foundation
 
 // Menu bar status item showing a count of busy AI agents.
 //
-// Adapted from upstream gnachman/iTerm2#670. In the spawnTerm fork the
-// entire feature is gated behind the "agent_menubar" capability flag
-// (spawnterm.agent_menubar, default OFF). The flag is the master switch:
+// Adapted from upstream gnachman/iTerm2#670. In the it2agent fork the
+// entire feature is gated behind the "menubar" capability flag
+// (agent.menubar, default OFF). The flag is the master switch:
 //   - When OFF, the controller reproduces stock behavior exactly — it only
 //     shows a status item for the legacy "excluded from Dock + status bar
 //     icon" combination, and that item never carries a busy-count badge.
@@ -88,9 +88,9 @@ class AIMenuBarStatusController: NSObject {
     }
 
     private func refreshOnMain() {
-        // spawnTerm master switch: the imported feature only exists when the
-        // agent_menubar capability flag is ON.
-        let flagOn = iTermSpawnTermCapabilities.isEnabled(forCapability: "agent_menubar")
+        // it2agent master switch: the imported feature only exists when the
+        // menubar capability flag is ON.
+        let flagOn = iTermAgentCapabilities.isEnabled(forCapability: "menubar")
         // The independent "always show a menu bar item" toggle is only honored
         // when the master flag is ON.
         let prefOn = flagOn && iTermAdvancedSettingsModel.showMenuBarItem()

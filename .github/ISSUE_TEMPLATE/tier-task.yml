@@ -1,5 +1,5 @@
 name: Tier task (agent-actionable)
-description: A spawnTerm task any agent can pick up from zero (issue = spec).
+description: A it2agent task any agent can pick up from zero (issue = spec).
 title: "[Tier N] <short title>"
 labels: ["type:feature", "status:blocked"]
 body:
@@ -13,7 +13,7 @@ body:
     validations: { required: true }
   - type: dropdown
     id: scope
-    attributes: { label: Scope, options: ["external-tooling (runs on iTerm2 API; lives in spawnterm/)", "iterm2-core (modifies iTerm2 source; upstream PR)"] }
+    attributes: { label: Scope, options: ["external-tooling (runs on iTerm2 API; lives in it2agent/)", "iterm2-core (modifies iTerm2 source; upstream PR)"] }
     validations: { required: true }
   - type: input
     id: deps

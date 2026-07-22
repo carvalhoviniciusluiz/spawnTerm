@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""it2agent-cost — per-agent + total token/cost dashboard (it2agent #16).
+
+Thin executable entry point. All logic lives in the importable, testable
+``cost_cli`` module (CLI/I/O) over the pure ``costlib`` core; this file only
+wires ``sys.path`` and dispatches to ``cost_cli.main`` so the tool works when
+invoked directly from the repo without installation.
+
+scope:external-tooling — consumes local Claude Code JSONL logs + a configurable
+price table; never modifies iTerm2 source. Gates on ``agent.cost_dashboard``.
+"""
+
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+import cost_cli  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(cost_cli.main(sys.argv[1:]))
