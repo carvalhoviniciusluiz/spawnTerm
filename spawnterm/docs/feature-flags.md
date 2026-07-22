@@ -46,6 +46,7 @@ Booleans only, under a single `[features]` table, with **quoted, fully-namespace
 "spawnterm.review" = false
 "spawnterm.tmux" = false
 "spawnterm.claude_statusbar" = false
+"spawnterm.agent_menubar" = false
 ```
 
 The format is deliberately constrained so a pure-shell parser and Python's `tomllib`
@@ -77,6 +78,7 @@ Namespaced keys are `spawnterm.<capability>`. All default **`false`**.
 | `spawnterm.review` | Per-agent diff/review surface (show worktree diff vs base; approve→merge / request-changes). |
 | `spawnterm.tmux` | Tier 3 tmux `-CC` persistence: spawn agents inside a native tmux `-CC` session so windows/agents survive quit/crash and can be reattached. |
 | `spawnterm.claude_statusbar` | Claude Code session status aggregator status-bar component (Waiting/Working/Idle across all windows), adapted from gnachman/iTerm2#648. |
+| `spawnterm.agent_menubar` | Menu bar status item with a live count badge of busy AI agents, adapted from gnachman/iTerm2#670. |
 
 ## Default-OFF rule
 

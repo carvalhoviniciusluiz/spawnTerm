@@ -36,6 +36,7 @@
 #import "iTermAnnouncementView.h"
 #import "iTermAnnouncementViewController.h"
 #import "iTermApplicationDelegate.h"
+#import "iTermSpawnTermCapabilities.h"
 #import "iTermArrangementKeys.h"
 #import "SmartSelectionController.h"
 #import "iTermAutomaticProfileSwitcher.h"
