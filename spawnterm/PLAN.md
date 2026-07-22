@@ -61,12 +61,21 @@ durable log. Each capability **gates on its feature-flag** (`spawnterm.<key>`, d
 7. **#6 Tier 4 core PRs** — only after real usage evidence from #3/#4.
 
 ## Progress (live)
-- **Phase 0 — DONE ✅**: #11 feature-flags, #7 emit (+ #8 colors/badge, #9 triggers, #10 spawn wrapper) → **Tier 0 (#2) closed**. Hotfix #23: user-var keys must be **dot-free** (`agent_status`, not `agent.status`; iTerm2 rejects `.`).
-- **Phase 1 — DONE ✅**: **Tier 1 (#3) closed** via #26 daemon skeleton + registry/subscriptions, #27 spawn+identity+cwd, #28 in-memory router, #29 status-bar dashboard. 80 unit tests, all pure/iTerm2-free.
-- **Phase 2 — IN PROGRESS**: #4 broker decomposed into #34 (core sqlite+socket, ready) → #35 mailbox+ack, #36 registry+handoff, #37 daemon↔broker bridge. #13 worktree+$PORT, #5 tmux, #14 review, #16 cost dashboard also unblocked.
+**All external-tooling tiers (0–3) + every capability are DONE ✅ and merged. 614 unit tests green on `master` (all pure / iTerm2-free).**
+- **Tier 0 (#2) ✅**: #11 feature-flags · #7 emit · #8 colors/badge · #9 triggers · #10 spawn wrapper. Hotfix #23: user-var keys are **dot-free** (`agent_status`, not `agent.status`; iTerm2 rejects `.`).
+- **Tier 1 (#3) ✅**: #26 daemon skeleton+registry+subscriptions · #27 spawn+identity+cwd · #28 in-memory router · #29 status-bar dashboard.
+- **Tier 2 (#4, the differentiator) ✅**: #34 broker core (sqlite+unix-socket) · #35 durable mailbox+ack+replay · #36 persistent registry+handoff store · #37 daemon↔broker bridge + ack-by-observation. Durable, db-backed messaging with ack — the moat vs tmux send-keys.
+- **Tier 3 (#5) ✅**: run agents under `tmux -CC`; API-over-tmux-CC validation shipped as a runnable harness + manual checklist, marked **UNVALIDATED** (needs a live iTerm2+tmux run — do it in the testing phase).
+- **Capabilities ✅**: #13 worktree+$PORT · #14 review surface · #15 janitor · #16 cost dashboard · #17 agent inbox · #18 MCP surface.
 
-## Ready-for-agent right now
-Phase 2: **#34** (broker core) and **#13** (worktree+$PORT) have no open blockers; #5/#14/#16 also ready. #35/#36/#37 unblock when #34 closes.
+## What remains
+Only **`scope:iterm2-core`** (edits iTerm2 source → upstream discussion with the maintainer first; NOT autonomous):
+- **#12** settings pane (AI tab GUI to toggle the flags) — depends on #11 (done).
+- **#6** Tier 4 core PRs (optional delivery-ack, native registry, persisted user-vars) — only after real usage evidence from #3/#4.
+Plus the live tmux-CC API validation (#5's checklist) to run against a real iTerm2.
+
+## Flags in the schema (all default OFF)
+`spawnterm.status_board · worktree_isolation · messaging · agent_inbox · cost_dashboard · janitor · mcp · daemon · broker · review · tmux`
 
 ## Reference
 - Epic index: issue **#1** (pinned). Architecture + iTerm2 capability map: `spawnterm/docs/design.md`.
