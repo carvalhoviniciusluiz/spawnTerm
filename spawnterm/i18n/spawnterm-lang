@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# spawnterm language selector (canonical shell implementation).
+#
+# Reads and writes the active-language setting [settings] language in the shared
+# config ($XDG_CONFIG_HOME/spawnterm/config.toml). spawnterm_lang.py is the
+# byte-for-byte parity twin.
+#
+#   spawnterm-lang get                 resolved active language (en or pt-BR)
+#   spawnterm-lang set <en|pt-BR|system>  write [settings] language
+#   spawnterm-lang list                available languages (catalogs found)
+#
+# CRITICAL: `set` performs a read-modify-write that PRESERVES an existing
+# [features] table (spawnterm-flag's data). Tables are serialized deterministically
+# so this tool and its Python twin produce identical files.
+#
+# Docs: spawnterm/i18n/README.md
+set -u
+
+PROG="spawnterm-lang"
+FEATURE_PREFIX="spawnterm."
+# Canonical feature order, mirrored from spawnterm-flag.
+KNOWN_FLAGS="status_board worktree_isolation messaging agent_inbox cost_dashboard janitor mcp daemon broker review tmux claude_statusbar agent_menubar codex_status"
+
+SD="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+
+err() {
+  printf '%s: %s\n' "$PROG" "$1" >&2
+}
+
+config_path() {
+  if [ -n "${SPAWNTERM_CONFIG:-}" ]; then
+    printf '%s' "$SPAWNTERM_CONFIG"
+    return
+  fi
+  local base="${XDG_CONFIG_HOME:-}"
+  if [ -z "$base" ]; then
+    base="$HOME/.config"
+  fi
+  printf '%s/spawnterm/config.toml' "$base"
+}
+
+read_feature() {
+  # $1 = capability name. Echo "true"/"false" if the key is present, else "".
+  local cap="$1" file line val
+  file="$(config_path)"
+  [ -f "$file" ] || return 0
+  line="$(grep -E "^[[:space:]]*\"?spawnterm\.${cap}\"?[[:space:]]*=" "$file" 2>/dev/null | head -1)"
+  [ -n "$line" ] || return 0
+  val="$(printf '%s' "$line" | sed -E 's/^[^=]*=[[:space:]]*([A-Za-z]+).*/\1/')"
+  if [ "$val" = "true" ]; then printf 'true'; else printf 'false'; fi
+}
+
+serialize() {
+  # $1 = language. Reads present features from the current config and re-emits
+  # [features] (if any) then [settings], deterministically.
+  local language="$1" cap val have_features=0
+  printf '# spawnterm config\n'
+  printf '# Managed by spawnterm-flag (features) and spawnterm-lang (settings).\n'
+  printf '# Docs: spawnterm/docs/feature-flags.md\n'
+  for cap in $KNOWN_FLAGS; do
+    val="$(read_feature "$cap")"
+    if [ -n "$val" ]; then
+      if [ "$have_features" -eq 0 ]; then
+        printf '[features]\n'
+        have_features=1
+      fi
+      printf '"%s%s" = %s\n' "$FEATURE_PREFIX" "$cap" "$val"
+    fi
+  done
+  printf '[settings]\n'
+  printf 'language = "%s"\n' "$language"
+}
+
+write_config() {
+  # $1 = language. Preserves the existing [features] table.
+  local language="$1" file dir body
+  body="$(serialize "$language")"
+  file="$(config_path)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" || { err "cannot create directory: $dir"; return 1; }
+  printf '%s\n' "$body" > "$file" || { err "cannot write config: $file"; return 1; }
+}
+
+active_language() {
+  # Delegate to the sibling lookup helper for a single source of truth.
+  if [ -x "$SD/spawnterm-i18n" ]; then
+    "$SD/spawnterm-i18n" lang
+    return
+  fi
+  printf 'en\n'
+}
+
+list_languages() {
+  local f base
+  for f in "$SD"/*.json; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f" .json)"
+    printf '%s\n' "$base"
+  done | sort
+}
+
+usage() {
+  cat <<EOF
+usage: $PROG <command> [lang]
+
+Commands:
+  get                  print the resolved active language (en or pt-BR)
+  set <en|pt-BR|system>  set [settings] language (preserves [features])
+  list                 print the available languages (catalogs found)
+  -h, --help           show this help
+
+Config: \$XDG_CONFIG_HOME/spawnterm/config.toml (falls back to ~/.config/...).
+Default language is en. get/list never create a file.
+EOF
+}
+
+is_valid_lang() {
+  case "$1" in
+    en|pt-BR|system) return 0 ;;
+    *)               return 1 ;;
+  esac
+}
+
+main() {
+  if [ "$#" -eq 0 ]; then
+    err "missing command"
+    usage >&2
+    return 2
+  fi
+
+  local command="$1"; shift
+  case "$command" in
+    -h|--help|help)
+      usage
+      return 0
+      ;;
+    get)
+      active_language
+      return 0
+      ;;
+    list)
+      list_languages
+      return 0
+      ;;
+    set)
+      if [ "$#" -ne 1 ]; then
+        err "set requires exactly one <lang>"
+        return 2
+      fi
+      if ! is_valid_lang "$1"; then
+        err "invalid language: $1 (valid: en, pt-BR, system)"
+        return 2
+      fi
+      write_config "$1"
+      return $?
+      ;;
+    *)
+      err "unknown command: $command"
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

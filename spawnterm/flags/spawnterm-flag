@@ -72,12 +72,26 @@ is_enabled() {
   [ "$(read_raw "$1")" = "true" ]
 }
 
+read_settings_language() {
+  # Echo the [settings] language value to preserve, or "" when absent. The flag
+  # writer never fabricates a [settings] table; it only re-emits an existing one
+  # so a language chosen via spawnterm-lang is not clobbered.
+  local file line val
+  file="$(config_path)"
+  [ -f "$file" ] || return 0
+  line="$(grep -E '^[[:space:]]*language[[:space:]]*=' "$file" 2>/dev/null | head -1)"
+  [ -n "$line" ] || return 0
+  val="$(printf '%s' "$line" | sed -E 's/^[^=]*=[[:space:]]*"?([A-Za-z-]+)"?.*/\1/')"
+  printf '%s' "$val"
+}
+
 canonical_body() {
-  # Writes the full seeded schema to stdout. Reads desired values from the
-  # WANT_<cap> environment set by the caller.
+  # Writes the full seeded schema to stdout, then a preserved [settings] table.
+  # Reads desired values from the WANT_<cap>/WANT_LANGUAGE env set by the caller.
+  # Canonical table order shared with spawnterm-lang: [features] then [settings].
   local cap var state
-  printf '# spawnterm feature flags\n'
-  printf '# Managed by spawnterm-flag. All flags default OFF when a key is absent.\n'
+  printf '# spawnterm config\n'
+  printf '# Managed by spawnterm-flag (features) and spawnterm-lang (settings).\n'
   printf '# Docs: spawnterm/docs/feature-flags.md\n'
   printf '[features]\n'
   for cap in $KNOWN_FLAGS; do
@@ -85,10 +99,15 @@ canonical_body() {
     if [ "$var" = "true" ]; then state="true"; else state="false"; fi
     printf '"%s%s" = %s\n' "$PREFIX" "$cap" "$state"
   done
+  if [ -n "${WANT_LANGUAGE:-}" ]; then
+    printf '[settings]\n'
+    printf 'language = "%s"\n' "$WANT_LANGUAGE"
+  fi
 }
 
 write_config() {
-  # $1 = capability to change, $2 = true/false. Preserves all other flags.
+  # $1 = capability to change, $2 = true/false. Preserves all other flags and
+  # any existing [settings] table.
   local target="$1" value="$2" cap file dir cur
   # Snapshot current effective values into WANT_<cap>.
   for cap in $KNOWN_FLAGS; do
@@ -100,6 +119,9 @@ write_config() {
     fi
     eval "WANT_${cap}=\"$cur\""
   done
+  # Snapshot the language BEFORE the write truncates the file (the `> "$file"`
+  # redirection below opens/truncates it before canonical_body runs).
+  WANT_LANGUAGE="$(read_settings_language)"
   file="$(config_path)"
   dir="$(dirname "$file")"
   mkdir -p "$dir" || { err "cannot create directory: $dir"; return 1; }

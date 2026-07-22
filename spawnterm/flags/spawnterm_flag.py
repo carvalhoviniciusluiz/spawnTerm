@@ -8,9 +8,16 @@ importable ``is_enabled(key) -> bool`` for the daemon and a CLI identical to
 the shell tool when run as ``python3 spawnterm_flag.py`` or ``python3 -m``.
 
 Config lives at ``$XDG_CONFIG_HOME/spawnterm/config.toml`` (falling back to
-``~/.config/spawnterm/config.toml``). Flags are quoted keys under a single
+``~/.config/spawnterm/config.toml``). Flags are quoted keys under a
 ``[features]`` table, e.g. ``"spawnterm.messaging" = true``. A missing file,
 a missing table, or a missing key all read as OFF. Reads never write a file.
+
+The config file may also carry a ``[settings]`` table (owned by spawnterm-lang,
+e.g. ``language``). The writer here does a read-modify-write that PRESERVES an
+existing ``[settings]`` table, mirroring how spawnterm-lang preserves
+``[features]``. Both tools share one canonical serialization — ``[features]``
+first, then ``[settings]`` — so repeated writes by either are stable and the
+shell/Python twins stay byte-identical.
 
 Docs: spawnterm/docs/feature-flags.md
 """
@@ -99,17 +106,48 @@ def is_enabled(key: str) -> bool:
     return value is True
 
 
+def _load_settings_language() -> str | None:
+    """Return the ``[settings] language`` string to preserve, or None if absent.
+
+    The flag writer never fabricates a ``[settings]`` table; it only re-emits one
+    that already exists so a language chosen via spawnterm-lang is not clobbered.
+    """
+    path = config_path()
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    settings = data.get("settings")
+    if isinstance(settings, dict):
+        language = settings.get("language")
+        if isinstance(language, str):
+            return language
+    return None
+
+
 def _canonical_body(values: dict[str, bool]) -> str:
-    """Serialize the full seeded schema deterministically (booleans only)."""
+    """Serialize [features] (full seeded schema) then a preserved [settings].
+
+    Canonical table order shared with spawnterm-lang: [features] first, then
+    [settings]. A table is emitted only when it has content — [settings] appears
+    only when the config already carries a language.
+    """
     lines = [
-        "# spawnterm feature flags",
-        "# Managed by spawnterm-flag. All flags default OFF when a key is absent.",
+        "# spawnterm config",
+        "# Managed by spawnterm-flag (features) and spawnterm-lang (settings).",
         "# Docs: spawnterm/docs/feature-flags.md",
         "[features]",
     ]
     for cap in KNOWN_FLAGS:
         state = "true" if values.get(cap, False) else "false"
         lines.append(f'"{PREFIX}{cap}" = {state}')
+    language = _load_settings_language()
+    if language is not None:
+        lines.append("[settings]")
+        lines.append(f'language = "{language}"')
     return "\n".join(lines) + "\n"
 
 
