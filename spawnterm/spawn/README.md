@@ -69,6 +69,27 @@ escape codes of its own. It finds the emit helper next to itself
 (`../emit/spawnterm-emit`) or on `PATH`, and resolves it to an absolute path so
 the call works regardless of the new session's `PATH`.
 
+### Worktree + port/namespace isolation (issue #13 — gated OFF by default)
+
+Parallel agents in separate git worktrees still collide on ports/DBs/services.
+When the feature flag `spawnterm.worktree_isolation` is **ON**, `spawnterm-spawn`
+delegates to the companion helper [`spawnterm-worktree`](./spawnterm-worktree) to
+give each agent its **own git worktree on its own branch** (used as the tab's
+working directory) plus a per-agent `$SPAWNTERM_PORT` and service/DB namespace
+`$SPAWNTERM_NS`, exported into the session before the command runs:
+
+```sh
+# per-agent worktree + port + namespace (needs spawnterm.worktree_isolation ON)
+spawnterm-spawn --id 13 --role worker --task "isolate" -- claude
+```
+
+Relevant spawn flags: `--id <id>` (anchors the deterministic allocation;
+defaults from `--role`/`--task`), `--base-port <n>` (default 41000), and
+`--no-probe`. When the flag is **OFF**, spawn behaves **exactly as #10** — plain
+`$PWD` inheritance, no worktree, no port. Full model, the
+`$SPAWNTERM_PORT`/`$SPAWNTERM_NS` contract, the branch/worktree naming scheme,
+and the cleanup safety rules are in **[WORKTREE.md](./WORKTREE.md)**.
+
 ## Feature-flag gating
 
 Spawning a tab is core, so it **always** happens. The identity emits gate
@@ -77,6 +98,12 @@ themselves: each is a plain call to `spawnterm-emit`, which self-gates on the
 OFF the emit calls produce nothing and exit 0, so the tab opens but simply isn't
 tagged. This is deliberately the simplest correct design — **one gate, in one
 place** (emit), rather than a second gate here that could drift.
+
+Worktree/port isolation is the one thing `spawnterm-spawn` gates directly
+(it is spawn-level behavior, not something delegated to a self-gating helper):
+it checks `spawnterm.worktree_isolation` via `spawnterm-flag`, with the same
+fail-safe / `--no-gate` / `SPAWNTERM_FORCE=1` convention. See
+[WORKTREE.md](./WORKTREE.md).
 
 Bypass the gate for local testing:
 
@@ -138,14 +165,23 @@ it costs nothing until the operator turns `spawnterm.status_board` on.
 ## Tests
 
 ```
-bash spawnterm/spawn/tests/test_spawn.sh
+bash spawnterm/spawn/tests/test_spawn.sh       # spawn (incl. isolation gate on/off)
+bash spawnterm/spawn/tests/test_worktree.sh    # the spawnterm-worktree helper
 ```
 
-Runs entirely in `--dry-run` (no iTerm2 needed) and asserts: default cwd equals
-the spawner's `$PWD`; `--dir`/`--home` overrides; the identity emits shell out to
-the merged `spawnterm-emit` and set the dot-free user vars; gate forwarding;
-`--help` exits 0; error paths exit 2; and that the generated AppleScript
-compiles (`osacompile`, when available).
+`test_spawn.sh` runs entirely in `--dry-run` (no iTerm2 needed) and asserts:
+default cwd equals the spawner's `$PWD`; `--dir`/`--home` overrides; the identity
+emits shell out to the merged `spawnterm-emit` and set the dot-free user vars;
+gate forwarding; that isolation is OFF by default (= #10, no port export) and,
+when forced ON, the tab `cd`s into the worktree and exports `$SPAWNTERM_PORT` /
+`$SPAWNTERM_NS`; `--help` exits 0; error paths exit 2; and that the generated
+AppleScript compiles (`osacompile`, when available).
+
+`test_worktree.sh` covers the pure allocator (determinism, branch/namespace
+sanitization, port range + collision-avoidance), the gate-off no-op, `--dry-run`
+(git plan, no side effects), a real `git worktree add`/`remove` cycle in a
+throwaway tmp repo, and the cleanup safety refusals (dirty + unmerged). See
+[WORKTREE.md](./WORKTREE.md).
 
 ## Notes / scope
 

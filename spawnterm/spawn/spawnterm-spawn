@@ -68,6 +68,35 @@ find_emit() {
 	return 1
 }
 
+# Locate the sibling spawnterm-worktree helper (#13), else fall back to PATH.
+find_worktree() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/spawnterm-worktree" ]; then
+		printf '%s/spawnterm-worktree' "$sd"
+		return 0
+	fi
+	if command -v spawnterm-worktree >/dev/null 2>&1; then
+		command -v spawnterm-worktree
+		return 0
+	fi
+	return 1
+}
+
+# Locate the sibling spawnterm-flag helper (#11), for the isolation gate.
+find_flag() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/../flags/spawnterm-flag" ]; then
+		fd="$(cd "$sd/../flags" && pwd)"
+		printf '%s/spawnterm-flag' "$fd"
+		return 0
+	fi
+	if command -v spawnterm-flag >/dev/null 2>&1; then
+		command -v spawnterm-flag
+		return 0
+	fi
+	return 1
+}
+
 die() {
 	printf '%s: %s\n' "$PROG" "$1" >&2
 	exit 2
@@ -92,24 +121,42 @@ Identity (stamped in the new session via spawnterm-emit):
   --status <s>     agent_status + tab color. One of: busy, blocked, done, idle.
                    Default: busy. The color is derived from the status.
 
+Worktree + port/namespace isolation (issue #13 — gated OFF by default):
+  --id <id>        Agent id anchoring the deterministic isolation allocation.
+                   Defaults to "<role>-<task>" (or "<role>"/"<task>") when
+                   isolation is ON and --id is omitted.
+  --base-port <n>  Base of the per-agent port range (default 41000).
+  --no-probe       Skip free-port probing; use the deterministic port as-is.
+  When the flag "spawnterm.worktree_isolation" is ON, the new tab opens in a
+  per-agent git WORKTREE on its own branch (not plain \$PWD), and the session
+  exports \$SPAWNTERM_PORT / \$SPAWNTERM_NS / \$SPAWNTERM_WORKTREE /
+  \$SPAWNTERM_BRANCH before the command runs. When OFF, spawn behaves exactly
+  as #10 (plain cwd inheritance, no worktree, no port). See WORKTREE.md.
+
 Other:
-  --no-gate        Forward --no-gate to every emit call (bypass the flag).
-  --dry-run        Print the resolved cwd, the emit calls, the command, and the
-                   AppleScript that WOULD run — execute nothing.
+  --no-gate        Forward --no-gate to every emit call AND bypass the
+                   worktree-isolation gate (local testing).
+  --dry-run        Print the resolved cwd, the isolation plan (if ON), the emit
+                   calls, the command, and the AppleScript that WOULD run —
+                   execute nothing.
   -h, --help       Show this help.
 
 Environment:
   SPAWNTERM_SPAWN_DRYRUN=1   Same as --dry-run.
-  SPAWNTERM_FORCE=1          Forwarded as --no-gate into the emit calls.
+  SPAWNTERM_FORCE=1          Forwarded as --no-gate into the emit calls and
+                             bypasses the worktree-isolation gate.
 
 Gating: the identity emits self-gate on the feature flag
-"spawnterm.status_board" (via spawnterm-emit -> spawnterm-flag). When the flag
-is OFF the tab still opens; it just isn't tagged/colored/badged. Spawning is
-core and never gated.
+"spawnterm.status_board" (via spawnterm-emit -> spawnterm-flag). Worktree/port
+isolation gates on "spawnterm.worktree_isolation" (checked here via
+spawnterm-flag). When both are OFF the tab still opens; it just isn't
+tagged/colored/badged and inherits the spawner's \$PWD. Spawning is core and
+never gated.
 
 Examples:
   $PROG --role worker --task "build #10" -- claude --dangerously-skip-permissions
   $PROG --dir ~/proj/api --role reviewer --status idle -- \$SHELL -l
+  $PROG --id 13 --role worker --task "isolate" -- claude   # per-agent worktree+port
 EOF
 }
 
@@ -119,6 +166,9 @@ USE_HOME=0
 ROLE=""
 TASK=""
 STATUS="busy"
+AGENT_ID=""
+BASE_PORT=""
+NO_PROBE=0
 NO_GATE=0
 DRYRUN="${SPAWNTERM_SPAWN_DRYRUN:-0}"
 [ "$DRYRUN" = "1" ] || DRYRUN=0
@@ -152,6 +202,18 @@ while [ $# -gt 0 ]; do
 			STATUS="$2"; shift 2 ;;
 		--status=*)
 			STATUS="${1#--status=}"; shift ;;
+		--id)
+			[ $# -ge 2 ] || die "--id requires an <id> argument"
+			AGENT_ID="$2"; shift 2 ;;
+		--id=*)
+			AGENT_ID="${1#--id=}"; shift ;;
+		--base-port)
+			[ $# -ge 2 ] || die "--base-port requires a value"
+			BASE_PORT="$2"; shift 2 ;;
+		--base-port=*)
+			BASE_PORT="${1#--base-port=}"; shift ;;
+		--no-probe)
+			NO_PROBE=1; shift ;;
 		--no-gate)
 			NO_GATE=1; shift ;;
 		--dry-run)
@@ -208,8 +270,95 @@ as_esc() {
 	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# --- capture the user command (trailing args) NOW ----------------------------
+# We snapshot $@ into RUN_CMD before the isolation block, because that block
+# uses `set --` to assemble helper args and would otherwise clobber $@.
+RUN_CMD=""
+for a in "$@"; do
+	if [ -z "$RUN_CMD" ]; then
+		RUN_CMD="$(shq "$a")"
+	else
+		RUN_CMD="$RUN_CMD $(shq "$a")"
+	fi
+done
+
+# --- worktree + port/namespace isolation (issue #13) -------------------------
+# Gated on spawnterm.worktree_isolation. When OFF (the default) this whole block
+# is a no-op and spawn behaves EXACTLY as #10: plain $PWD inheritance, no
+# worktree, no port. When ON, we delegate to the sibling spawnterm-worktree
+# helper to create a per-agent worktree on its own branch, override the cwd to
+# that worktree, and export the per-agent $SPAWNTERM_PORT / $SPAWNTERM_NS (plus
+# _WORKTREE / _BRANCH) into the new session before the command runs.
+ISOLATION_EXPORTS=""   # export lines injected into the session (empty when OFF)
+ISOLATION_PLAN=""      # human-readable plan captured from the helper (dry-run)
+ISOLATION_ON=0
+
+# Gate: same fail-safe / --no-gate / SPAWNTERM_FORCE convention as emit. OFF if
+# the flag helper is missing or the flag is not true.
+iso_gate_open() {
+	[ "${SPAWNTERM_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	fl="$(find_flag 2>/dev/null)" || return 1
+	if "$fl" spawnterm.worktree_isolation >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+if iso_gate_open; then
+	ISOLATION_ON=1
+	if ! WT="$(find_worktree)"; then
+		die "worktree isolation is ON but spawnterm-worktree was not found (next to this script or on PATH)"
+	fi
+	# Isolation requires a git repo; resolve the top-level from the resolved cwd.
+	REPO_ROOT="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)" \
+		|| die "worktree isolation is ON but $CWD is not inside a git repository"
+
+	# Derive the agent id if not given explicitly.
+	iso_id="$AGENT_ID"
+	if [ -z "$iso_id" ]; then
+		if [ -n "$ROLE" ] && [ -n "$TASK" ]; then iso_id="$ROLE-$TASK"
+		elif [ -n "$ROLE" ]; then iso_id="$ROLE"
+		elif [ -n "$TASK" ]; then iso_id="$TASK"
+		else die "worktree isolation is ON but no --id (or --role/--task) to derive an agent id from"
+		fi
+	fi
+
+	# Assemble the helper args. Forward --no-gate when we bypassed our own gate,
+	# so the helper (which also self-gates) runs in lockstep with this wrapper.
+	set -- create --repo "$REPO_ROOT" --id "$iso_id"
+	[ -n "$ROLE" ] && set -- "$@" --role "$ROLE"
+	[ -n "$TASK" ] && set -- "$@" --task "$TASK"
+	[ -n "$BASE_PORT" ] && set -- "$@" --base-port "$BASE_PORT"
+	[ "$NO_PROBE" = "1" ] && set -- "$@" --no-probe
+	[ "$NO_GATE" = "1" ] && set -- "$@" --no-gate
+	[ "$DRYRUN" = "1" ] && set -- "$@" --dry-run
+
+	if ! ISOLATION_PLAN="$("$WT" "$@")"; then
+		die "spawnterm-worktree create failed (see errors above)"
+	fi
+
+	# Parse the allocation the helper printed on stdout (key=value lines).
+	iso_val() { printf '%s\n' "$ISOLATION_PLAN" | sed -n "s/^$1=//p" | head -1; }
+	ISO_WORKTREE="$(iso_val worktree)"
+	ISO_PORT="$(iso_val port)"
+	ISO_NS="$(iso_val namespace)"
+	ISO_BRANCH="$(iso_val branch)"
+	[ -n "$ISO_WORKTREE" ] || die "spawnterm-worktree did not return a worktree path"
+
+	# The worktree becomes the working directory (replacing plain cwd inheritance).
+	CWD="$ISO_WORKTREE"
+
+	# Exports written into the new session BEFORE the command runs.
+	ISOLATION_EXPORTS="export SPAWNTERM_PORT=$(shq "$ISO_PORT")
+export SPAWNTERM_NS=$(shq "$ISO_NS")
+export SPAWNTERM_WORKTREE=$(shq "$ISO_WORKTREE")
+export SPAWNTERM_BRANCH=$(shq "$ISO_BRANCH")
+"
+fi
+
 # --- build the shell commands to write into the new session ------------------
-# 1) cd into the resolved cwd.
+# 1) cd into the resolved cwd (the worktree when isolation is ON, else $PWD).
 CD_CMD="cd $(shq "$CWD")"
 
 # 2) identity emits. --no-gate is forwarded when requested so the operator's
@@ -229,19 +378,14 @@ add_emit "status $(shq "$STATUS")"
 add_emit "color $(shq "$STATUS")"
 add_emit "badge"
 
-# 3) the user command (trailing args), shell-quoted.
-RUN_CMD=""
-for a in "$@"; do
-	if [ -z "$RUN_CMD" ]; then
-		RUN_CMD="$(shq "$a")"
-	else
-		RUN_CMD="$RUN_CMD $(shq "$a")"
-	fi
-done
+# 3) the user command was captured into RUN_CMD above (before the isolation
+#    block, which uses `set --`).
 
-# The full script written into the new session, one command per line.
+# The full script written into the new session, one command per line. When
+# isolation is ON the per-agent env exports go right after the cd, so they are
+# in scope for both the identity emits and the agent command.
 SESSION_SCRIPT="$CD_CMD
-${EMIT_CMDS}${RUN_CMD}"
+${ISOLATION_EXPORTS}${EMIT_CMDS}${RUN_CMD}"
 
 # --- assemble the AppleScript -------------------------------------------------
 # iTerm2 scripting model: create a tab in the current window (or a new window if
@@ -272,6 +416,11 @@ if [ "$DRYRUN" = "1" ]; then
 	printf '  resolved cwd : %s\n' "$CWD"
 	printf '  emit helper  : %s\n' "$EMIT"
 	printf '  gate bypass  : %s\n' "$([ "$NO_GATE" = 1 ] && echo 'yes (--no-gate forwarded)' || echo 'no (emit self-gates on spawnterm.status_board)')"
+	printf '  isolation    : %s\n' "$([ "$ISOLATION_ON" = 1 ] && echo 'ON (spawnterm.worktree_isolation) — per-agent worktree + port' || echo 'off (plain $PWD inheritance, = #10)')"
+	if [ "$ISOLATION_ON" = "1" ]; then
+		printf '\n  worktree isolation plan (from spawnterm-worktree):\n'
+		printf '%s\n' "$ISOLATION_PLAN" | sed 's/^/    /'
+	fi
 	printf '\n  commands written into the new session:\n'
 	printf '%s\n' "$SESSION_SCRIPT" | sed 's/^/    /'
 	printf '\n  AppleScript that WOULD run:\n'
