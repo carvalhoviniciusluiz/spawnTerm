@@ -97,6 +97,11 @@ def _run_forever(logger: logging.Logger) -> None:
     async def main(connection):
         adapter = DaemonAdapter(connection, registry, logger)
         logger.info("connected to iTerm2 Python API; starting monitors")
+        # Register the agent-dashboard status-bar component (#29). Self-gated on
+        # spawnterm.status_board; a no-op when that flag is OFF.
+        from dashboard import maybe_register_dashboard
+
+        await maybe_register_dashboard(connection, logger)
         await adapter.run()
 
     iterm2.run_forever(main)
