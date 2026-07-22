@@ -34,15 +34,6 @@ Major New Features:
   source of truth. If spawnterm-flag cannot be
   found the checkboxes are shown disabled.
 
-- The spawnTerm tab now has a language picker
-  (English, Português, System). It reads and
-  writes [settings] language in config.toml via
-  the spawnterm-lang CLI (config.toml stays the
-  single source of truth) and re-localizes the
-  capability labels on the fly through
-  spawnterm-i18n. If spawnterm-i18n is missing,
-  labels fall back to built-in English.
-
 - A new spawnTerm capability, "Claude Code
   Status Bar", adds an opt-in status-bar
   component that aggregates Claude Code session

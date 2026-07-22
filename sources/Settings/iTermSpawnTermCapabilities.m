@@ -11,16 +11,9 @@
 // NoSync so a custom-prefs-folder user is not prompted to sync a machine-local
 // path.
 static NSString *const iTermSpawnTermFlagPathUserDefaultsKey = @"NoSyncSpawnTermFlagPath";
-static NSString *const iTermSpawnTermI18nPathUserDefaultsKey = @"NoSyncSpawnTermI18nPath";
-static NSString *const iTermSpawnTermLangPathUserDefaultsKey = @"NoSyncSpawnTermLangPath";
 
-// Environment variables that, when set, override all other resolution.
+// Environment variable that, when set, overrides all other resolution.
 static NSString *const iTermSpawnTermFlagEnvironmentVariable = @"SPAWNTERM_FLAG";
-static NSString *const iTermSpawnTermI18nEnvironmentVariable = @"SPAWNTERM_I18N";
-static NSString *const iTermSpawnTermLangEnvironmentVariable = @"SPAWNTERM_LANG";
-
-// The synthetic preference key backing the language popup.
-static NSString *const iTermSpawnTermLanguagePreferenceKey = @"spawnterm.ui.language";
 
 @implementation iTermSpawnTermCapabilities
 
@@ -59,10 +52,6 @@ static NSString *const iTermSpawnTermLanguagePreferenceKey = @"spawnterm.ui.lang
     return keys;
 }
 
-+ (NSString *)languagePreferenceKey {
-    return iTermSpawnTermLanguagePreferenceKey;
-}
-
 + (NSString *)displayNameForCapability:(NSString *)capability {
     static NSDictionary<NSString *, NSString *> *names;
     static dispatch_once_t onceToken;
@@ -88,23 +77,6 @@ static NSString *const iTermSpawnTermLanguagePreferenceKey = @"spawnterm.ui.lang
     }
     // Fallback: title-case the identifier so an unknown capability still reads.
     return [capability capitalizedString];
-}
-
-#pragma mark - Localized labels
-
-+ (NSString *)localizedNameForCapability:(NSString *)capability {
-    NSString *key = [NSString stringWithFormat:@"cap.%@.name", capability];
-    NSString *localized = [self translateKey:key];
-    if (localized.length > 0) {
-        return localized;
-    }
-    // Fail-safe: the built-in English display-name map. Never blank, never crash.
-    return [self displayNameForCapability:capability];
-}
-
-+ (NSString *)localizedDescForCapability:(NSString *)capability {
-    NSString *key = [NSString stringWithFormat:@"cap.%@.desc", capability];
-    return [self translateKey:key];
 }
 
 #pragma mark - Executable resolution
@@ -155,20 +127,6 @@ static NSString *const iTermSpawnTermLanguagePreferenceKey = @"spawnterm.ui.lang
     return [self executablePathForTool:@"spawnterm-flag"
                                 envVar:iTermSpawnTermFlagEnvironmentVariable
                        userDefaultsKey:iTermSpawnTermFlagPathUserDefaultsKey];
-}
-
-// Convenience accessor for spawnterm-i18n (localized labels).
-+ (nullable NSString *)i18nExecutablePath {
-    return [self executablePathForTool:@"spawnterm-i18n"
-                                envVar:iTermSpawnTermI18nEnvironmentVariable
-                       userDefaultsKey:iTermSpawnTermI18nPathUserDefaultsKey];
-}
-
-// Convenience accessor for spawnterm-lang (language get/set).
-+ (nullable NSString *)langExecutablePath {
-    return [self executablePathForTool:@"spawnterm-lang"
-                                envVar:iTermSpawnTermLangEnvironmentVariable
-                       userDefaultsKey:iTermSpawnTermLangPathUserDefaultsKey];
 }
 
 + (nullable NSString *)resolveExecutablePathForTool:(NSString *)tool
@@ -284,51 +242,12 @@ static NSString *const iTermSpawnTermLanguagePreferenceKey = @"spawnterm.ui.lang
     return cache;
 }
 
-// Cache of i18n key -> localized string (from `spawnterm-i18n t <key>`).
-// Cleared alongside the flag state cache so a language change re-localizes.
-+ (NSMutableDictionary<NSString *, NSString *> *)localizedStringCache {
-    static NSMutableDictionary<NSString *, NSString *> *cache;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cache = [NSMutableDictionary dictionary];
-    });
-    return cache;
-}
-
 static BOOL sCacheLoaded = NO;
 
 + (void)invalidateCache {
     @synchronized (self) {
         sCacheLoaded = NO;
         [[self stateCache] removeAllObjects];
-        [[self localizedStringCache] removeAllObjects];
-    }
-}
-
-// Run `spawnterm-i18n t <key>` and return the trimmed localized string, or nil
-// if spawnterm-i18n is unavailable or the key resolved to nothing. spawnterm-i18n
-// echoes the key verbatim when it is missing from every catalog, so a result
-// equal to the key is treated as a miss (nil) and the caller applies its own
-// fail-safe. Results are cached (including within a language) until invalidated.
-+ (nullable NSString *)translateKey:(NSString *)key {
-    @synchronized (self) {
-        NSString *cached = [self localizedStringCache][key];
-        if (cached) {
-            return cached.length > 0 ? cached : nil;
-        }
-        NSString *path = [self i18nExecutablePath];
-        if (!path) {
-            [self localizedStringCache][key] = @"";  // negative cache
-            return nil;
-        }
-        NSString *output = [self runExecutable:path arguments:@[ @"t", key ] exitStatus:NULL];
-        NSString *trimmed = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length == 0 || [trimmed isEqualToString:key]) {
-            [self localizedStringCache][key] = @"";  // negative cache (missing key)
-            return nil;
-        }
-        [self localizedStringCache][key] = trimmed;
-        return trimmed;
     }
 }
 
@@ -396,63 +315,6 @@ static BOOL sCacheLoaded = NO;
     [self runExecutable:path arguments:@[ subcommand, capability ] exitStatus:&status];
     DLog(@"spawnterm-flag %@ %@ exited %d", subcommand, capability, status);
     // Re-query on next read so the cache reflects what the CLI actually wrote.
-    [self invalidateCache];
-}
-
-#pragma mark - Language
-
-+ (NSArray<NSString *> *)languageCodes {
-    // Mirrors the valid values accepted by `spawnterm-lang set`.
-    return @[ @"en", @"pt-BR", @"system" ];
-}
-
-+ (NSString *)displayNameForLanguageCode:(NSString *)code {
-    if ([code isEqualToString:@"en"]) {
-        return @"English";
-    }
-    if ([code isEqualToString:@"pt-BR"]) {
-        return @"Português";
-    }
-    if ([code isEqualToString:@"system"]) {
-        NSString *localized = [self translateKey:@"settings.language.system"];
-        return localized.length > 0 ? localized : @"System";
-    }
-    return code;
-}
-
-+ (NSString *)languageFieldLabel {
-    NSString *localized = [self translateKey:@"settings.language.label"];
-    return localized.length > 0 ? localized : @"Language";
-}
-
-+ (BOOL)languageAvailable {
-    return [self langExecutablePath] != nil;
-}
-
-+ (NSString *)currentLanguageCode {
-    NSString *path = [self langExecutablePath];
-    if (path) {
-        NSString *output = [self runExecutable:path arguments:@[ @"current" ] exitStatus:NULL];
-        NSString *trimmed = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([[self languageCodes] containsObject:trimmed]) {
-            return trimmed;
-        }
-    }
-    // Fail-safe: the default language so the picker always has a valid selection.
-    return @"en";
-}
-
-+ (void)setCurrentLanguageCode:(NSString *)code {
-    NSString *path = [self langExecutablePath];
-    if (!path) {
-        DLog(@"Ignoring language set %@: spawnterm-lang unavailable", code);
-        return;
-    }
-    int status = -1;
-    [self runExecutable:path arguments:@[ @"set", code ] exitStatus:&status];
-    DLog(@"spawnterm-lang set %@ exited %d", code, status);
-    // The active language changed: drop cached localized strings so labels
-    // re-resolve in the new language on next read.
     [self invalidateCache];
 }
 

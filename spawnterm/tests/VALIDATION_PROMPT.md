@@ -23,7 +23,7 @@ Regras:
 ```sh
 export REPO="/Users/vinicius.carvalho/Developments/Workspaces/carvalhotech/spawnterm"
 export ST="$REPO/spawnterm"
-export PATH="$ST:$ST/flags:$ST/emit:$ST/spawn:$ST/i18n:$ST/broker:$ST/review:$ST/janitor:$ST/cost:$ST/inbox:$ST/mcp:$ST/tmux:$PATH"
+export PATH="$ST:$ST/flags:$ST/emit:$ST/spawn:$ST/broker:$ST/review:$ST/janitor:$ST/cost:$ST/inbox:$ST/mcp:$ST/tmux:$PATH"
 export SPAWNTERM_CONFIG="$(mktemp -d)/config.toml"
 ```
 
@@ -96,33 +96,20 @@ PY
 ```
 ✅ se registra/consulta e o handoff volta a última versão.
 
-## 6. i18n (inglês default + pt-BR, configurável)
-```sh
-spawnterm-lang list                       # en, pt-BR (e system)
-spawnterm-lang get                         # en (default)
-spawnterm-i18n t cap.broker.name           # "Broker"
-spawnterm-lang set pt-BR
-spawnterm-i18n t cap.broker.desc           # em português
-spawnterm-lang current                     # pt-BR (valor cru)
-# e confirme que ligar um flag NÃO apaga o idioma (bug que corrigimos):
-spawnterm-flag enable spawnterm.mcp; spawnterm-lang get   # ainda pt-BR
-```
-✅ se troca de idioma funciona e `[settings]`/`[features]` coexistem sem se apagar.
-
-## 7. Worktree + $PORT (isolamento por agente)
+## 6. Worktree + $PORT (isolamento por agente)
 ```sh
 spawnterm-flag enable spawnterm.worktree_isolation
 ( cd "$REPO" && SPAWNTERM_FORCE=1 spawnterm-worktree plan --id demo --role backend )
 ```
 ✅ se imprime branch `spawnterm/backend-demo-<hash>`, worktree fora do repo, port em 41000–41999, namespace.
 
-## 8. Spawn com identidade (dry-run; abrir aba real precisa do iTerm2 rodando)
+## 7. Spawn com identidade (dry-run; abrir aba real precisa do iTerm2 rodando)
 ```sh
 ( cd "$REPO" && SPAWNTERM_FORCE=1 spawnterm-spawn --dry-run --role backend --id demo -- claude )
 ```
 ✅ se o plano mostra cwd herdado, os `spawnterm-emit` de identidade, o header do guia e (se worktree ON) o plano de isolamento.
 
-## 9. MCP surface (auto-orquestração)
+## 8. MCP surface (auto-orquestração)
 ```sh
 spawnterm-flag enable spawnterm.mcp
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
@@ -131,7 +118,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
 ```
 ✅ se `tools/list` retorna 7 tools (spawn, assign, handoff, send_message, status, list_agents, help).
 
-## 10. Review / janitor / cost / inbox (smoke)
+## 9. Review / janitor / cost / inbox (smoke)
 ```sh
 spawnterm-flag enable spawnterm.review spawnterm.janitor spawnterm.cost_dashboard spawnterm.agent_inbox 2>/dev/null
 ( cd "$REPO" && SPAWNTERM_FORCE=1 spawnterm-review resolve --id demo --role backend )   # resolve branch/base
@@ -141,13 +128,13 @@ SPAWNTERM_FORCE=1 spawnterm-inbox list 2>&1 | head -3
 ```
 ✅ se cada um responde sem crash (o de cost mostra tabela por-agente a partir dos fixtures).
 
-## 11. GUI (só no app compilado — marque como "pendente de build" se ainda não compilou)
+## 10. GUI (só no app compilado — marque como "pendente de build" se ainda não compilou)
 - Settings → General → AI → **spawnTerm**: checkboxes das 14 capacidades + os 3 imports de IA
-  (Claude status-bar, menu-bar de agentes, Codex tab status) + o popup **Language** (English/Português/System).
+  (Claude status-bar, menu-bar de agentes, Codex tab status).
 - Ligar `claude_statusbar`/`agent_menubar`/`codex_status` e ver o componente aparecer.
 
 ## Relatório final
-Devolva uma tabela ✅/❌ por seção (1–11), citando a evidência real (bytes/JSON/saída). No fim,
+Devolva uma tabela ✅/❌ por seção (1–10), citando a evidência real (bytes/JSON/saída). No fim,
 liste o que passou no CLI agora vs. o que ficou pendente de build (GUI). Restaure meus flags
 (o `SPAWNTERM_CONFIG` era temporário, então nada foi tocado no meu config real) e mate o broker
 que subiu (`kill %1` ou pelo PID).
