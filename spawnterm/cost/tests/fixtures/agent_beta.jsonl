@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"refactor auth"},"cwd":"/work/beta","gitBranch":"feat/beta","sessionId":"sess-beta","timestamp":"2026-07-01T10:00:00Z"}
+{"type":"assistant","message":{"model":"claude-sonnet-4-5","role":"assistant","usage":{"input_tokens":5000,"output_tokens":2000,"cache_read_input_tokens":10000}},"cwd":"/work/beta","gitBranch":"feat/beta","sessionId":"sess-beta","timestamp":"2026-07-01T10:00:00Z"}

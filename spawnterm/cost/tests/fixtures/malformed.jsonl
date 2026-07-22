@@ -1,0 +1,7 @@
+{ this is not valid json at all
+
+null
+[1,2,3]
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5}},"cwd":"/work/gamma","sessionId":"sess-gamma","timestamp":"2026-07-01T10:00:00Z"}
+{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/work/gamma"}
+{"type":"assistant","message":{"model":"claude-haiku-4","usage":{"input_tokens":"bad","output_tokens":null,"cache_read_input_tokens":100}},"cwd":"/work/gamma","timestamp":"not-a-timestamp"}
