@@ -96,8 +96,18 @@ paranoid-deps` fails on libsixel; Metal toolchain + `CNoise` submodule missing).
 5. `make run`, then exercise the real flow: spawn with identity, status board colors/badge, broker send+ack, review surface, cost dashboard, MCP tools, and the **UNVALIDATED** tmux-CC Python-API checklist (`spawnterm/tmux/API_VALIDATION.md`).
 6. Enable capabilities via the new Settings → General → AI → spawnTerm pane (all default OFF).
 
+## Upstream imports (brought into this fork; NEVER pushed back)
+Cherry-picked from open PRs on `gnachman/iTerm2` and adapted to our tree. The 3 AI ones are gated behind new flags in the Settings → General → AI → spawnTerm pane (default OFF):
+- **#57 ← upstream #607** — Python API `websockets>=14` migration (infra, no flag; our daemon uses this lib). Verified: 12 lib tests green.
+- **#58 ← upstream #648** — Claude Code status-bar aggregator → flag `claude_statusbar`.
+- **#59 ← upstream #670** — menu-bar item for busy AI agents → flag `agent_menubar`.
+- **#60 ← upstream #673** — Codex CLI activity in tab status → flag `codex_status`.
+
 ## Flags in the schema (all default OFF)
-`spawnterm.status_board · worktree_isolation · messaging · agent_inbox · cost_dashboard · janitor · mcp · daemon · broker · review · tmux`
+`spawnterm.status_board · worktree_isolation · messaging · agent_inbox · cost_dashboard · janitor · mcp · daemon · broker · review · tmux · claude_statusbar · agent_menubar · codex_status`
+
+## Discovering capabilities (agent-facing)
+`spawnterm help` (or `AGENT_GUIDE.md`, or the MCP `help` tool / `spawnterm://guide` resource) prints the consolidated cheat-sheet: each capability → its flag → command/MCP tool → example.
 
 ## Reference
 - Epic index: issue **#1** (pinned). Architecture + iTerm2 capability map: `spawnterm/docs/design.md`.
