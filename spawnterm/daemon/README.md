@@ -7,8 +7,8 @@ iTerm2 source.
 
 The daemon connects to the iTerm2 Python API websocket, survives the session via
 `iterm2.run_forever`, and maintains an **in-memory, ephemeral** registry of
-sessions. It ingests agent messages (logs them — routing is #28) and tracks
-which sessions are idle / awaiting input.
+sessions. It ingests agent messages (parses, logs, and best-effort routes them
+between sessions — #28) and tracks which sessions are idle / awaiting input.
 
 > The durable queue / registry-as-source-of-truth is **Tier 2 (#4)** and is out
 > of scope here. This registry is rebuilt from live iTerm2 state on every start.
@@ -64,7 +64,7 @@ package is missing).
 | --- | --- |
 | `NewSessionMonitor` (`new_session`) | **add** a `SessionRecord` keyed by `session_id` (title, cwd, agent vars). |
 | `SessionTerminationMonitor` (`terminate_session`) | **remove** the record. |
-| `CustomControlSequenceMonitor` (`custom_escape_sequence`, id `spawnterm`) | **ingest**: parse the envelope and structured-log it (routing is #28). |
+| `CustomControlSequenceMonitor` (`custom_escape_sequence`, id `spawnterm`) | **ingest**: parse + structured-log the envelope, then best-effort **route** it (#28). |
 | `PromptMonitor` (`prompt`, one per session) | mark the session **idle / awaiting input**. |
 
 ## Agent identity user vars (dot-free)
@@ -94,6 +94,37 @@ The payload is a small JSON envelope; only `v` and `type` are required:
 Parsing is **defensive** — malformed input is logged and dropped, never crashes
 the daemon. `parse_envelope` is reused by the router in #28.
 
+## Routing (`spawnterm.messaging`, Tier 1.3, #28)
+
+A parsed envelope is handed to the pure `router` module, which resolves the
+`to` field against the live registry and returns a structured `RoutingDecision`
+(target session ids + the exact text to inject, or an undeliverable reason). On
+a deliverable decision the adapter calls `Session.async_send_text` into each
+target. The injected line is prefixed `[spawnterm] message from <sender>: …` so
+the receiving agent can tell a relayed message apart from local input.
+
+**Resolution precedence** for `to`:
+
+1. **`agent_id`** — an exact id match wins outright; nothing else is considered.
+2. **`agent_role`** — fallback only when *no* session matched by id. **All**
+   sessions in that role receive the message (fan-out).
+3. otherwise → undeliverable (`no match`).
+
+The sender's own session is never a target (self-send guard). Undeliverable
+reasons: `messaging disabled`, `no destination`, `empty body`, `no match`,
+`self`.
+
+**Gate.** Routing is gated on the `spawnterm.messaging` feature flag, which —
+like every capability — **defaults OFF**. When it is OFF the daemon still
+parses and logs each ingested envelope but does **not** route. Turn it on with
+`spawnterm-flag enable spawnterm.messaging`.
+
+> **Best-effort only (non-goal here).** This is an in-memory relay: no queue,
+> replay, ack, retry, or ordering. If the target session is absent the message
+> is undeliverable; if it is present the text is injected and may be lost if the
+> agent is busy. The durable inbox + ack path is **Tier 2 (#4)** — precisely the
+> gap this best-effort relay leaves open.
+
 ## Architecture (testability)
 
 iTerm2 is not available in CI, so the real logic is **pure** and importable
@@ -103,7 +134,8 @@ without the `iterm2` package:
 | --- | --- | --- |
 | `registry.py` | **pure** | `Registry` + `SessionRecord`: add/remove/update/query + idle transition. |
 | `envelope.py` | **pure** | `parse_envelope` → `Envelope` / `ParseResult`. |
-| `adapter.py` | lazy `import iterm2` | `DaemonAdapter`: translates iTerm2 monitor events into registry calls. |
+| `router.py` | **pure** | `route` / `route_if_enabled` → `RoutingDecision`; `messaging_enabled` gate. |
+| `adapter.py` | lazy `import iterm2` | `DaemonAdapter`: translates iTerm2 monitor events into registry calls; delivers routed text. |
 | `spawnterm_daemon.py` | lazy `import iterm2` | entry point: CLI, flag gate, `run_forever`. |
 
 `iterm2` is imported **only inside methods**, never at module top-level, so the
@@ -116,5 +148,7 @@ bash spawnterm/daemon/tests/run_tests.sh
 ```
 
 Pure Python, no `iterm2` needed. Covers registry add/remove/update, the idle
-transition, envelope parse (valid + every malformed case), the default-OFF flag
-gate, and the guarantee that no daemon module imports `iterm2` at load time.
+transition, envelope parse (valid + every malformed case), routing (id/role
+precedence, fan-out, self-guard, undeliverable cases, the `spawnterm.messaging`
+gate), the default-OFF daemon flag gate, and the guarantee that no daemon module
+imports `iterm2` at load time.
