@@ -18,6 +18,7 @@ class TestPurity(unittest.TestCase):
         # Import the pure modules and the entry/adapter modules; none of them
         # may import iterm2 at module load time.
         import adapter  # noqa: F401
+        import bridge  # noqa: F401
         import envelope  # noqa: F401
         import registry  # noqa: F401
         import spawnterm_daemon  # noqa: F401

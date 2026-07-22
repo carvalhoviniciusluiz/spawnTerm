@@ -9,13 +9,19 @@ environment without the ``iterm2`` package. All state lives in the pure
 registry calls and logs ingested envelopes.
 
 Wiring:
-  * ``NewSessionMonitor`` / ``SessionTerminationMonitor`` → registry add/remove.
-  * ``CustomControlSequenceMonitor(identity="spawnterm")`` → envelope ingest
-    (parse + structured log, then best-effort route via ``router``, #28).
+  * ``NewSessionMonitor`` / ``SessionTerminationMonitor`` → registry add/remove
+    **and** the durable broker registry (``register`` / ``touch``, #36) via the
+    bridge.
+  * ``CustomControlSequenceMonitor(identity="spawnterm")`` → envelope ingest,
+    handed to the #37 :mod:`bridge`: durable ``broker send`` when the broker is
+    reachable, else the #28 in-memory best-effort route.
   * one ``PromptMonitor`` per session → mark the session idle (awaiting input).
+  * a delivery poll loop → drain the durable mailbox into live sessions with
+    ack-by-observation (bridge ``deliver_once``), when a broker is present.
 
 Nothing here is exercised by CI (iTerm2 is unavailable); the testable logic is
-intentionally pushed down into the pure modules.
+intentionally pushed down into the pure modules (``bridge`` owns the routing /
+mode / ack decisions, unit-tested with a fake broker client and fake screens).
 """
 
 from __future__ import annotations
@@ -23,9 +29,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from bridge import Bridge, connect_broker
 from envelope import parse_envelope
 from registry import AGENT_VAR_KEYS, Registry
-from router import messaging_enabled, route_if_enabled
+
+# How often the delivery loop polls the durable mailbox for live recipients.
+DELIVERY_POLL_INTERVAL_SECONDS = 1.0
 
 # Identity string agents use in their custom control sequence:
 #   OSC 1337 ; Custom=id=spawnterm : <json payload> ST
@@ -51,6 +60,9 @@ class DaemonAdapter:
         self.identity = identity
         # session_id -> asyncio.Task running that session's prompt monitor.
         self._prompt_tasks: dict[str, asyncio.Task] = {}
+        # The #37 daemon↔broker bridge. Constructed in run() (which does the
+        # broker connect I/O); None until then, so the spawn path never connects.
+        self.bridge: Bridge | None = None
 
     # -- entry point ------------------------------------------------------
 
@@ -58,14 +70,36 @@ class DaemonAdapter:
         """Seed the registry from live state, then run all monitors forever."""
         import iterm2  # lazy: keep the top-level import iterm2-free.
 
+        self._setup_bridge()
+
         app = await iterm2.async_get_app(self.connection)
         await self._seed_from_app(app)
         self.log.info("seeded registry with %d live session(s)", len(self.registry))
 
-        await asyncio.gather(
+        coros = [
             self._watch_new_sessions(),
             self._watch_terminated_sessions(),
             self._watch_custom_sequences(),
+        ]
+        # Only drive the delivery poll loop when a broker is present; otherwise
+        # there is no durable mailbox to drain (in-memory delivery is inline).
+        if self.bridge is not None and self.bridge.broker is not None:
+            coros.append(self._delivery_loop())
+        await asyncio.gather(*coros)
+
+    def _setup_bridge(self) -> None:
+        """Best-effort connect to the broker and build the bridge (#37).
+
+        A missing/down broker yields a bridge with no client — the daemon then
+        runs the #28 in-memory best-effort relay. Never raises.
+        """
+        broker = connect_broker(self.log)
+        self.bridge = Bridge(
+            broker,
+            self.registry,
+            send_text=self._send_text,
+            read_screen=self._read_screen,
+            logger=self.log,
         )
 
     # -- startup seeding --------------------------------------------------
@@ -78,8 +112,12 @@ class DaemonAdapter:
 
     async def _register_session(self, session) -> None:
         title, cwd, agent_vars = await self._snapshot(session)
-        self.registry.add(session.session_id, title=title, cwd=cwd, **agent_vars)
+        record = self.registry.add(session.session_id, title=title, cwd=cwd, **agent_vars)
         self._start_prompt_monitor(session.session_id)
+        # Reflect the live session (role/task/liveness) into the durable broker
+        # registry (#36). No-op unless the broker flag is on and reachable.
+        if self.bridge is not None:
+            self.bridge.note_session(record)
 
     async def _snapshot(self, session) -> tuple[str, str, dict]:
         """Read title, cwd, and the dot-free agent_* user vars for a session.
@@ -120,7 +158,9 @@ class DaemonAdapter:
         session = app.get_session_by_id(session_id)
         if session is None:
             # Register the bare id; details fill in on later events.
-            self.registry.add(session_id)
+            record = self.registry.add(session_id)
+            if self.bridge is not None:
+                self.bridge.note_session(record)
         else:
             await self._register_session(session)
         self.log.info("new_session %s (registry size %d)", session_id, len(self.registry))
@@ -136,6 +176,10 @@ class DaemonAdapter:
     def _on_terminate_session(self, session_id: str) -> None:
         removed = self.registry.remove(session_id)
         self._stop_prompt_monitor(session_id)
+        # Mark it not-alive in the durable broker registry (#36). No-op when the
+        # broker is off/unreachable.
+        if self.bridge is not None:
+            self.bridge.note_terminated(session_id)
         self.log.info(
             "terminate_session %s (removed=%s, registry size %d)",
             session_id,
@@ -157,7 +201,12 @@ class DaemonAdapter:
                 await self._ingest(payload)
 
     async def _ingest(self, payload: str) -> None:
-        """Parse, structured-log, then best-effort route one agent envelope (#28)."""
+        """Parse, structured-log, then hand the envelope to the #37 bridge.
+
+        The bridge decides durable (broker ``send``) vs in-memory (#28 route),
+        gated on ``spawnterm.messaging`` + ``spawnterm.broker`` (see bridge). We
+        still parse/log every envelope here regardless of the flags.
+        """
         result = parse_envelope(payload)
         if not result.ok:
             self.log.warning("ingest: dropped malformed envelope: %s", result.error)
@@ -172,31 +221,82 @@ class DaemonAdapter:
             env.known_type,
             env.body,
         )
-        # Routing (#28): gated on spawnterm.messaging (default OFF). When the
-        # flag is OFF we still parsed/logged above but do not route. Best-effort
-        # only — no durability/replay/ack/ordering (that is Tier 2 / #4).
-        decision = route_if_enabled(env, self.registry, enabled=messaging_enabled())
-        if not decision.deliverable:
-            self.log.info("route: undeliverable (%s)", decision.reason)
+        if self.bridge is None:  # defensive: run() always builds it before ingest.
+            self.log.warning("ingest: bridge not initialized; dropping")
             return
-        await self._deliver(decision)
+        outcome = await self.bridge.handle_ingest(env)
+        self.log.info(
+            "ingest: mode=%s action=%s reason=%s msg_id=%s targets=%s degraded=%s",
+            outcome.mode,
+            outcome.action,
+            outcome.reason,
+            outcome.msg_id,
+            outcome.targets,
+            outcome.degraded,
+        )
 
-    async def _deliver(self, decision) -> None:
-        """Inject a deliverable decision's text into each target session."""
+    # -- delivery poll loop (durable mailbox → live sessions) ------------
+
+    async def _delivery_loop(self) -> None:
+        """Periodically drain the durable mailbox into live sessions (#37).
+
+        Each tick is a bridge ``deliver_once`` sweep (poll → inject → observe →
+        ack). Runs only when a broker is present; a per-tick failure is logged
+        and the loop continues (the daemon must never crash because the broker
+        is down). The sleep is a poll cadence, not a concurrency workaround.
+        """
+        while True:
+            try:
+                outcome = await self.bridge.deliver_once()
+                if outcome.delivered or outcome.acked:
+                    self.log.info(
+                        "delivery: polled=%d delivered=%d acked=%d degraded=%s",
+                        outcome.polled,
+                        outcome.delivered,
+                        outcome.acked,
+                        outcome.degraded,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a sweep bug must not kill the loop
+                self.log.debug("delivery: sweep failed: %s", exc)
+            await asyncio.sleep(DELIVERY_POLL_INTERVAL_SECONDS)
+
+    # -- injected iTerm2 I/O for the bridge (the only iTerm2 touch here) --
+
+    async def _send_text(self, session_id: str, text: str) -> None:
+        """Inject ``text`` into ``session_id`` (bridge send callable)."""
         import iterm2
 
         app = await iterm2.async_get_app(self.connection)
-        for session_id in decision.target_session_ids:
+        session = app.get_session_by_id(session_id)
+        if session is None:
+            self.log.info("deliver: target %s gone; message not sent", session_id)
+            return
+        await session.async_send_text(text)
+        self.log.info("deliver: sent to %s", session_id)
+
+    async def _read_screen(self, session_id: str) -> str:
+        """Return ``session_id``'s visible screen text (bridge observe callable).
+
+        Defensive: a gone session or a read failure yields ``""`` (not observed)
+        rather than raising, so ack-by-observation simply declines to ack.
+        """
+        import iterm2
+
+        try:
+            app = await iterm2.async_get_app(self.connection)
             session = app.get_session_by_id(session_id)
             if session is None:
-                self.log.info("route: target %s gone; message lost", session_id)
-                continue
-            await session.async_send_text(decision.text)
-            self.log.info(
-                "route: delivered to %s (matched_by=%s)",
-                session_id,
-                decision.matched_by,
-            )
+                return ""
+            contents = await session.async_get_screen_contents()
+            lines = []
+            for i in range(contents.number_of_lines):
+                lines.append(contents.line(i).string)
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - a bad read => not observed, never crash
+            self.log.debug("deliver: screen read failed for %s: %s", session_id, exc)
+            return ""
 
     # -- prompt (idle) monitors ------------------------------------------
 
