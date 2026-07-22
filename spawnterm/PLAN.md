@@ -60,8 +60,13 @@ durable log. Each capability **gates on its feature-flag** (`spawnterm.<key>`, d
 **Phase 4 — Upstream:**
 7. **#6 Tier 4 core PRs** — only after real usage evidence from #3/#4.
 
+## Progress (live)
+- **Phase 0 — DONE ✅**: #11 feature-flags, #7 emit (+ #8 colors/badge, #9 triggers, #10 spawn wrapper) → **Tier 0 (#2) closed**. Hotfix #23: user-var keys must be **dot-free** (`agent_status`, not `agent.status`; iTerm2 rejects `.`).
+- **Phase 1 — DONE ✅**: **Tier 1 (#3) closed** via #26 daemon skeleton + registry/subscriptions, #27 spawn+identity+cwd, #28 in-memory router, #29 status-bar dashboard. 80 unit tests, all pure/iTerm2-free.
+- **Phase 2 — IN PROGRESS**: #4 broker decomposed into #34 (core sqlite+socket, ready) → #35 mailbox+ack, #36 registry+handoff, #37 daemon↔broker bridge. #13 worktree+$PORT, #5 tmux, #14 review, #16 cost dashboard also unblocked.
+
 ## Ready-for-agent right now
-**#11** and **#7** (both no blockers). Everything else is `status:blocked` until its dependency above closes.
+Phase 2: **#34** (broker core) and **#13** (worktree+$PORT) have no open blockers; #5/#14/#16 also ready. #35/#36/#37 unblock when #34 closes.
 
 ## Reference
 - Epic index: issue **#1** (pinned). Architecture + iTerm2 capability map: `spawnterm/docs/design.md`.
