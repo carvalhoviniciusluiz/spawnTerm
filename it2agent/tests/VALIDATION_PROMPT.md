@@ -21,7 +21,7 @@ Regras:
 
 ## 0. Setup (rode primeiro)
 ```sh
-export REPO="/Users/vinicius.carvalho/Developments/Workspaces/carvalhotech/it2agent"
+export REPO="/Users/vinicius.carvalho/Developments/Workspaces/carvalhotech/spawnterm"
 export ST="$REPO/it2agent"
 export PATH="$ST:$ST/flags:$ST/emit:$ST/spawn:$ST/broker:$ST/review:$ST/janitor:$ST/cost:$ST/inbox:$ST/mcp:$ST/tmux:$PATH"
 export IT2AGENT_CONFIG="$(mktemp -d)/config.toml"
@@ -129,7 +129,7 @@ IT2AGENT_FORCE=1 it2agent-inbox list 2>&1 | head -3
 ✅ se cada um responde sem crash (o de cost mostra tabela por-agente a partir dos fixtures).
 
 ## 10. GUI (só no app compilado — marque como "pendente de build" se ainda não compilou)
-- Settings → General → AI → **it2agent**: checkboxes das 14 capacidades + os 3 imports de IA
+- Settings → General → AI → **AI Agents**: checkboxes das 14 capacidades + os 3 imports de IA
   (Claude status-bar, menu-bar de agentes, Codex tab status).
 - Ligar `claude_statusbar`/`menubar`/`codex_status` e ver o componente aparecer.
 
