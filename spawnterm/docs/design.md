@@ -20,7 +20,7 @@ Python daemon (Tier 1) bridges the broker to live sessions.
 
 ## Capability map (what each tier builds on)
 **A — escape codes (Tier 0), affects only the emitting session:**
-`OSC 1337 ; SetUserVar=agent.status=<b64>` (state) · `SetColors`/tab color · `SetMark` · `AddAnnotation`
+`OSC 1337 ; SetUserVar=agent_status=<b64>` (state; iTerm2 forbids `.` in the key) · `SetColors`/tab color · `SetMark` · `AddAnnotation`
 · `RequestAttention=yes` (needs-human) · `OSC 9 ; <msg>` (notification) · `OSC 9 ; 4 ; state ; pct`
 (progress) · badge interpolates user vars. Cheap, no daemon.
 

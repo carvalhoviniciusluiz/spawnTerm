@@ -19,9 +19,9 @@ spawnterm-emit [--no-gate] <command> [args]
 
 | Command | Emits (framing: `OSC = ESC ]`, terminator `ST = BEL 0x07`) |
 | --- | --- |
-| `status <value>` | `ESC ] 1337 ; SetUserVar=agent.status=<base64(value)> BEL` |
-| `role <value>` | `ESC ] 1337 ; SetUserVar=agent.role=<base64(value)> BEL` |
-| `task <value>` | `ESC ] 1337 ; SetUserVar=agent.task=<base64(value)> BEL` |
+| `status <value>` | `ESC ] 1337 ; SetUserVar=agent_status=<base64(value)> BEL` |
+| `role <value>` | `ESC ] 1337 ; SetUserVar=agent_role=<base64(value)> BEL` |
+| `task <value>` | `ESC ] 1337 ; SetUserVar=agent_task=<base64(value)> BEL` |
 | `attention [message]` | `ESC ] 1337 ; RequestAttention=yes BEL` then `ESC ] 9 ; <message> BEL` |
 | `mark` | `ESC ] 1337 ; SetMark BEL` |
 | `progress <state> <pct>` | `ESC ] 9 ; 4 ; <state> ; <pct> BEL` (ConEmu style) |
@@ -37,7 +37,7 @@ spawnterm-emit [--no-gate] <command> [args]
 a lifecycle status — `busy`, `blocked`, `done`, `idle` — mapped to a
 colorblind-safe (Okabe-Ito) hex, or a raw `RGB`/`RRGGBB` hex for other roles.
 `badge` sets the session badge; iTerm2 requires the format base64-encoded, and
-the default `\(user.agent.role) · \(user.agent.task)` interpolates the user vars
+the default `\(user.agent_role) · \(user.agent_task)` interpolates the user vars
 set by `role`/`task`. The full palette, colorblind rationale, and exact byte
 sequences are in [`docs/colors.md`](docs/colors.md).
 

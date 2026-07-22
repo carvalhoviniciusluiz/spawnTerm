@@ -9,7 +9,7 @@
 #   OSC = ESC ]                    (0x1b 0x5d)
 #   ST  = BEL                      (0x07)  <- iTerm2-documented terminator
 # Sequences emitted:
-#   status|role|task <v> -> ESC ] 1337 ; SetUserVar=agent.<k>=<base64(v)> BEL
+#   status|role|task <v> -> ESC ] 1337 ; SetUserVar=agent_<k>=<base64(v)> BEL
 #   attention [msg]      -> ESC ] 1337 ; RequestAttention=yes BEL
 #                           ESC ] 9 ; <msg> BEL
 #   mark                 -> ESC ] 1337 ; SetMark BEL
@@ -35,9 +35,11 @@ set -eu
 PROG="spawnterm-emit"
 FLAG_KEY="spawnterm.status_board"
 DEFAULT_ATTENTION_MSG="spawnterm: agent needs attention"
-# Default badge interpolates the user vars set by `role`/`task` (iTerm2 exposes
-# SetUserVar=agent.<k> as user.agent.<k>). Middle dot separates role and task.
-DEFAULT_BADGE_FORMAT='\(user.agent.role) · \(user.agent.task)'
+# Default badge interpolates the user vars set by `role`/`task`. iTerm2 forbids
+# `.` in a SetUserVar key (PTYSession.screenSetUserVar: rejects it) and prefixes
+# `user.` itself, so `SetUserVar=agent_<k>` becomes `user.agent_<k>`. Middle dot
+# separates role and task in the displayed badge.
+DEFAULT_BADGE_FORMAT='\(user.agent_role) · \(user.agent_task)'
 
 usage() {
 	cat <<EOF
@@ -47,9 +49,9 @@ Usage:
   $PROG [--no-gate] <command> [args]
 
 Commands:
-  status <value>          Set user var agent.status (base64'd).
-  role <value>            Set user var agent.role (base64'd).
-  task <value>            Set user var agent.task (base64'd).
+  status <value>          Set user var agent_status (base64'd).
+  role <value>            Set user var agent_role (base64'd).
+  task <value>            Set user var agent_task (base64'd).
   attention [message]     RequestAttention=yes + an OSC 9 notification.
                           Default message: "$DEFAULT_ATTENTION_MSG"
   mark                    Emit SetMark.
@@ -180,7 +182,7 @@ seq=""
 case "$cmd" in
 	status | role | task)
 		[ $# -eq 1 ] || die "$cmd requires exactly one <value> argument"
-		seq="$(osc "1337;SetUserVar=agent.$cmd=$(b64 "$1")")"
+		seq="$(osc "1337;SetUserVar=agent_$cmd=$(b64 "$1")")"
 		;;
 	attention)
 		if [ $# -ge 1 ]; then

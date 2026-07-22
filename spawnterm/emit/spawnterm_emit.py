@@ -27,9 +27,11 @@ import sys
 PROG = "spawnterm-emit"
 FLAG_KEY = "spawnterm.status_board"
 DEFAULT_ATTENTION_MSG = "spawnterm: agent needs attention"
-# Default badge interpolates the user vars set by `role`/`task` (iTerm2 exposes
-# SetUserVar=agent.<k> as user.agent.<k>). Middle dot separates role and task.
-DEFAULT_BADGE_FORMAT = r"\(user.agent.role) · \(user.agent.task)"
+# Default badge interpolates the user vars set by `role`/`task`. iTerm2 forbids
+# `.` in a SetUserVar key (PTYSession.screenSetUserVar: rejects it) and prefixes
+# `user.` itself, so `SetUserVar=agent_<k>` becomes `user.agent_<k>`. Middle dot
+# separates role and task in the displayed badge.
+DEFAULT_BADGE_FORMAT = r"\(user.agent_role) · \(user.agent_task)"
 
 # Lifecycle palette: colorblind-safe (Okabe-Ito). Kept byte-identical with the
 # shell `color_for`. Rationale + exact bytes: spawnterm/emit/docs/colors.md.
@@ -52,9 +54,9 @@ Usage:
   {PROG} [--no-gate] <command> [args]
 
 Commands:
-  status <value>          Set user var agent.status (base64'd).
-  role <value>            Set user var agent.role (base64'd).
-  task <value>            Set user var agent.task (base64'd).
+  status <value>          Set user var agent_status (base64'd).
+  role <value>            Set user var agent_role (base64'd).
+  task <value>            Set user var agent_task (base64'd).
   attention [message]     RequestAttention=yes + an OSC 9 notification.
                           Default message: "{DEFAULT_ATTENTION_MSG}"
   mark                    Emit SetMark.
@@ -142,7 +144,7 @@ def build_sequence(cmd, args):
     if cmd in ("status", "role", "task"):
         if len(args) != 1:
             die(f"{cmd} requires exactly one <value> argument")
-        return osc(f"1337;SetUserVar=agent.{cmd}={b64(args[0])}")
+        return osc(f"1337;SetUserVar=agent_{cmd}={b64(args[0])}")
     if cmd == "attention":
         msg = " ".join(args) if args else DEFAULT_ATTENTION_MSG
         return osc("1337;RequestAttention=yes") + osc(f"9;{msg}")
