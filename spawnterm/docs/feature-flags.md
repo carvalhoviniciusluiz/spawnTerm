@@ -43,6 +43,7 @@ Booleans only, under a single `[features]` table, with **quoted, fully-namespace
 "spawnterm.mcp" = false
 "spawnterm.daemon" = false
 "spawnterm.broker" = false
+"spawnterm.review" = false
 ```
 
 The format is deliberately constrained so a pure-shell parser and Python's `tomllib`
@@ -71,6 +72,7 @@ Namespaced keys are `spawnterm.<capability>`. All default **`false`**.
 | `spawnterm.mcp` | MCP surface exposing spawnterm to agents. |
 | `spawnterm.daemon` | Tier 1 iTerm2 Python API orchestration daemon (registry + ingest/idle). |
 | `spawnterm.broker` | Tier 2 external broker (durable sqlite mailbox/registry/state/ack over a unix socket). |
+| `spawnterm.review` | Per-agent diff/review surface (show worktree diff vs base; approve→merge / request-changes). |
 
 ## Default-OFF rule
 

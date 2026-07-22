@@ -37,6 +37,7 @@ KNOWN_FLAGS: dict[str, str] = {
     "mcp": "MCP surface exposing spawnterm to agents.",
     "daemon": "Tier 1 iTerm2 Python API orchestration daemon (registry + ingest/idle).",
     "broker": "Tier 2 external broker (durable sqlite mailbox/registry/state/ack over a unix socket).",
+    "review": "Per-agent diff/review surface (show worktree diff vs base; approve->merge / request-changes).",
 }
 
 
