@@ -41,6 +41,7 @@ Booleans only, under a single `[features]` table, with **quoted, fully-namespace
 "spawnterm.cost_dashboard" = false
 "spawnterm.janitor" = false
 "spawnterm.mcp" = false
+"spawnterm.daemon" = false
 ```
 
 The format is deliberately constrained so a pure-shell parser and Python's `tomllib`
@@ -67,6 +68,7 @@ Namespaced keys are `spawnterm.<capability>`. All default **`false`**.
 | `spawnterm.cost_dashboard` | Token/cost dashboard. |
 | `spawnterm.janitor` | Background cleanup of stale worktrees/sessions. |
 | `spawnterm.mcp` | MCP surface exposing spawnterm to agents. |
+| `spawnterm.daemon` | Tier 1 iTerm2 Python API orchestration daemon (registry + ingest/idle). |
 
 ## Default-OFF rule
 

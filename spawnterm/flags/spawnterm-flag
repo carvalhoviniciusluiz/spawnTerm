@@ -18,7 +18,7 @@ PREFIX="spawnterm."
 # Seeded schema, canonical order. MUST stay in sync with KNOWN_FLAGS in
 # spawnterm_flag.py. Capability names only (no prefix); space-separated so
 # this works on bash 3.2 (no associative arrays).
-KNOWN_FLAGS="status_board worktree_isolation messaging agent_inbox cost_dashboard janitor mcp"
+KNOWN_FLAGS="status_board worktree_isolation messaging agent_inbox cost_dashboard janitor mcp daemon"
 
 err() {
   printf 'spawnterm-flag: %s\n' "$1" >&2

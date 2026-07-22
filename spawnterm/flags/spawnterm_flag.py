@@ -35,6 +35,7 @@ KNOWN_FLAGS: dict[str, str] = {
     "cost_dashboard": "Token/cost dashboard.",
     "janitor": "Background cleanup of stale worktrees/sessions.",
     "mcp": "MCP surface exposing spawnterm to agents.",
+    "daemon": "Tier 1 iTerm2 Python API orchestration daemon (registry + ingest/idle).",
 }
 
 
