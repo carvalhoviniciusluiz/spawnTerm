@@ -52,6 +52,18 @@ Major New Features:
   General > AI > spawnTerm. Adapted from
   gnachman/iTerm2#670.
 
+- A new spawnTerm capability, "Codex Tab
+  Status", shows Codex CLI working/idle
+  activity in the tab status. Codex does not
+  emit OSC 21337; it prefixes the terminal
+  title with a braille spinner while working.
+  A built-in Title Changed trigger decodes
+  that and drives the tab indicator dot and
+  subtitle like a native emitter. Off by
+  default; enable it in Settings > General >
+  AI > spawnTerm. Adapted from
+  gnachman/iTerm2#673.
+
 - The Companion app can now receive push
   notifications for terminal alerts. Turn on
   "Send alerts to paired iPhone" in a profile's
