@@ -27,6 +27,18 @@ import sys
 PROG = "spawnterm-emit"
 FLAG_KEY = "spawnterm.status_board"
 DEFAULT_ATTENTION_MSG = "spawnterm: agent needs attention"
+# Default badge interpolates the user vars set by `role`/`task` (iTerm2 exposes
+# SetUserVar=agent.<k> as user.agent.<k>). Middle dot separates role and task.
+DEFAULT_BADGE_FORMAT = r"\(user.agent.role) · \(user.agent.task)"
+
+# Lifecycle palette: colorblind-safe (Okabe-Ito). Kept byte-identical with the
+# shell `color_for`. Rationale + exact bytes: spawnterm/emit/docs/colors.md.
+STATUS_COLORS = {
+    "busy": "0072B2",
+    "blocked": "E69F00",
+    "done": "009E73",
+    "idle": "999999",
+}
 
 ESC = "\033"
 BEL = "\007"
@@ -48,6 +60,11 @@ Commands:
   mark                    Emit SetMark.
   progress <state> <pct>  ConEmu progress. state in {{0,1,2,3,4}}, pct in 0..100.
                           0=remove 1=normal 2=error 3=indeterminate 4=paused
+  color <role-or-status>  Set the tab color (SetColors=tab). Accepts a lifecycle
+                          status (busy, blocked, done, idle) mapped to a
+                          colorblind-safe hex, or a raw RGB/RRGGBB hex.
+  badge [format]          Set the session badge (SetBadgeFormat, base64'd).
+                          Default: {DEFAULT_BADGE_FORMAT}
 
 Options:
   --no-gate               Bypass the feature-flag gate (local testing).
@@ -103,6 +120,23 @@ def is_uint(text):
     return text.isdigit()
 
 
+def is_hex(text):
+    """True for a 3- or 6-digit hex color (case-insensitive), no leading '#'."""
+    if len(text) not in (3, 6):
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in text)
+
+
+def color_for(name):
+    """Map a lifecycle status/role to a colorblind-safe hex, or pass a raw hex
+    through. Returns RRGGBB, or None for unknown input."""
+    if name in STATUS_COLORS:
+        return STATUS_COLORS[name]
+    if is_hex(name):
+        return name
+    return None
+
+
 def build_sequence(cmd, args):
     """Validate args and return the raw escape sequence. Bad input exits(2)."""
     if cmd in ("status", "role", "task"):
@@ -127,6 +161,19 @@ def build_sequence(cmd, args):
         if not (0 <= int(pct) <= 100):
             die(f"progress pct must be 0..100 (got: {pct})")
         return osc(f"9;4;{state};{pct}")
+    if cmd == "color":
+        if len(args) != 1:
+            die("color requires exactly one <role-or-status> argument")
+        hex_value = color_for(args[0])
+        if hex_value is None:
+            die(
+                f"unknown status/role: {args[0]} "
+                "(known: busy, blocked, done, idle; or pass a RGB/RRGGBB hex)"
+            )
+        return osc(f"1337;SetColors=tab={hex_value}")
+    if cmd == "badge":
+        fmt = " ".join(args) if args else DEFAULT_BADGE_FORMAT
+        return osc(f"1337;SetBadgeFormat={b64(fmt)}")
     die(f"unknown command: {cmd} (try --help)")
 
 

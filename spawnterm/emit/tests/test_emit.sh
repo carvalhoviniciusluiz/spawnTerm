@@ -81,6 +81,42 @@ parity "progress-normal"   progress 1 37
 parity "progress-error"    progress 2 100
 # Values containing shell/printf metacharacters must survive intact.
 parity "status-metachars" status '100% done; path=$HOME "quoted" `cmd`'
+# Tier 0.2 (#8): tab color per lifecycle status + session badge.
+parity "color-busy"        color busy
+parity "color-blocked"     color blocked
+parity "color-done"        color done
+parity "color-idle"        color idle
+parity "color-rawhex"      color a1b2c3
+parity "color-rgbshort"    color fff
+parity "badge-default"     badge
+parity "badge-custom"      badge '\(user.agent.role): \(user.agent.status)'
+
+echo
+echo "--- 1b. color palette + badge base64 correctness ---"
+# Each lifecycle status maps to its documented colorblind-safe (Okabe-Ito) hex.
+check_color() {
+	local status="$1" want_hex="$2" out
+	out="$(SPAWNTERM_FORCE=1 sh "$SH" color "$status")"
+	if printf '%s' "$out" | grep -q "SetColors=tab=${want_hex}"; then
+		green "color $status -> SetColors=tab=$want_hex"
+	else
+		red "color $status wrong hex: $(printf '%s' "$out" | cat -v)"
+	fi
+}
+check_color busy    0072B2
+check_color blocked E69F00
+check_color done    009E73
+check_color idle    999999
+
+# The badge payload must be base64 that decodes back to the exact format string.
+badge_b64="$(SPAWNTERM_FORCE=1 sh "$SH" badge | sed -e 's/.*SetBadgeFormat=//' -e 's/'"$(printf '\007')"'$//')"
+badge_decoded="$(printf '%s' "$badge_b64" | base64 --decode 2>/dev/null || printf '%s' "$badge_b64" | base64 -D)"
+want_badge='\(user.agent.role) · \(user.agent.task)'
+if [ "$badge_decoded" = "$want_badge" ]; then
+	green "badge base64 round-trips to the default format"
+else
+	red "badge base64 mismatch: got [$(printf '%s' "$badge_decoded" | cat -v)]"
+fi
 
 echo
 echo "--- 2. feature-flag gating ---"
@@ -107,6 +143,11 @@ expect_exit  "python: flag absent exits 0"  0  gate_env python3 "$PY" status "x"
 # Flag helper present but reports OFF (prints 0, exit 1) => no output.
 expect_empty "shell:  flag OFF -> no output"   gate_env env PATH="$FLAG_OFF:$PATH" sh "$SH" status "x"
 expect_empty "python: flag OFF -> no output"   gate_env env PATH="$FLAG_OFF:$PATH" python3 "$PY" status "x"
+# The new color/badge subcommands gate on the SAME flag (no forked gate).
+expect_empty "shell:  color flag OFF -> no output"  gate_env env PATH="$FLAG_OFF:$PATH" sh "$SH" color busy
+expect_empty "python: color flag OFF -> no output"  gate_env env PATH="$FLAG_OFF:$PATH" python3 "$PY" color busy
+expect_empty "shell:  badge flag OFF -> no output"  gate_env env PATH="$FLAG_OFF:$PATH" sh "$SH" badge
+expect_empty "shell:  color flag absent -> no output"  gate_env sh "$SH" color busy
 
 # Flag helper reports ON (prints 1, exit 0) => both emit, byte-identical.
 on_sh="$(gate_env env PATH="$FLAG_ON:$PATH" sh "$SH" mark | hexof)"
@@ -138,6 +179,14 @@ expect_exit "shell:  status missing arg"  2  env SPAWNTERM_FORCE=1 sh "$SH" stat
 expect_exit "python: status missing arg"  2  env SPAWNTERM_FORCE=1 python3 "$PY" status
 expect_exit "shell:  unknown command"     2  env SPAWNTERM_FORCE=1 sh "$SH" frobnicate
 expect_exit "python: unknown command"     2  env SPAWNTERM_FORCE=1 python3 "$PY" frobnicate
+expect_exit "shell:  color unknown status" 2  env SPAWNTERM_FORCE=1 sh "$SH" color nope
+expect_exit "python: color unknown status" 2  env SPAWNTERM_FORCE=1 python3 "$PY" color nope
+expect_exit "shell:  color bad hex"        2  env SPAWNTERM_FORCE=1 sh "$SH" color gggggg
+expect_exit "python: color bad hex"        2  env SPAWNTERM_FORCE=1 python3 "$PY" color gggggg
+expect_exit "shell:  color missing arg"    2  env SPAWNTERM_FORCE=1 sh "$SH" color
+expect_exit "python: color missing arg"    2  env SPAWNTERM_FORCE=1 python3 "$PY" color
+expect_exit "shell:  color too many args"  2  env SPAWNTERM_FORCE=1 sh "$SH" color busy idle
+expect_exit "python: color too many args"  2  env SPAWNTERM_FORCE=1 python3 "$PY" color busy idle
 
 echo
 echo "--- 4. --help exits 0 on both ---"
