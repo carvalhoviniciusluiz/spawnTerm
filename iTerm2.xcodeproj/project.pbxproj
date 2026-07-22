@@ -747,6 +747,7 @@
 		4C4BE71D1C8948BD8CD672BC /* iTermLayoutCalculator.m in Sources */ = {isa = PBXBuildFile; fileRef = AF19E441FF824539A275D8DA /* iTermLayoutCalculator.m */; };
 		4C9D9EF0E49226A8A974CE88 /* SearchResultSoftBoundaryExtender.swift in Sources */ = {isa = PBXBuildFile; fileRef = A004AF3FD82E9DE92D43DF5E /* SearchResultSoftBoundaryExtender.swift */; };
 		4E3E450BA1D28C959FAA41DB /* ClaudeCodeIntegrationMenuController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83F411648885DE6A00CA8321 /* ClaudeCodeIntegrationMenuController.swift */; };
+		4ECF56E6C2076558C12E647B /* iTermStatusBarClaudeCodeComponent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54AADA79898323919FF35EDE /* iTermStatusBarClaudeCodeComponent.swift */; };
 		4F14EF289B1DF0B36511C009 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = AC1ED2504AA2D268CA4C341F /* Yams */; };
 		5014B8205948503D05992B8E /* CompanionPushSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = C253AF0160FA01071B7DD22F /* CompanionPushSender.swift */; };
 		51A4E0853124F0481929EF76 /* CompanionProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = 223B2226AFD38553CBB6D072 /* CompanionProtocol */; };
@@ -5479,6 +5480,7 @@
 		D3D470D34777DFA2474E14DC /* iTermSessionTabStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA1C7B91071000DE37B9DA33 /* iTermSessionTabStatus.swift */; };
 		D456895D420CBEEDC331D5F7 /* StatusPrioritySettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AB44D00ABCD3E5DC090E2D2 /* StatusPrioritySettings.swift */; };
 		D4D2E570EFEAF9FA77EDFF84 /* AutoModeClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE771C4F77C837427ABA9B44 /* AutoModeClassifier.swift */; };
+		D527FCD24E10A4FD16FB364E /* ClaudeCodeStatusPopoverViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61D89C465BB288CE41607C3F /* ClaudeCodeStatusPopoverViewController.swift */; };
 		D52DA7A75005457424B6ECB8 /* CompanionTransport in Frameworks */ = {isa = PBXBuildFile; productRef = B64D2673BB7E3F17D208CC22 /* CompanionTransport */; };
 		D5EF7F4036204859817200E0 /* iTermLayoutCalculator.h in Headers */ = {isa = PBXBuildFile; fileRef = 93EDFB853885460AA504C6B9 /* iTermLayoutCalculator.h */; };
 		D730EE99C79E77BDAFA30E2C /* ApplyLayoutBuiltInFunction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9801DA0646B0541548CD6B0E /* ApplyLayoutBuiltInFunction.swift */; };
@@ -6654,6 +6656,7 @@
 		53FF981B20927F1E008688D7 /* template_pyenv_simple.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; name = template_pyenv_simple.py; path = sources/template_pyenv_simple.py; sourceTree = "<group>"; };
 		53FF981F209283BE008688D7 /* template_basic_daemon.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; name = template_basic_daemon.py; path = sources/template_basic_daemon.py; sourceTree = "<group>"; };
 		53FF9823209283D2008688D7 /* template_pyenv_daemon.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; name = template_pyenv_daemon.py; path = sources/template_pyenv_daemon.py; sourceTree = "<group>"; };
+		54AADA79898323919FF35EDE /* iTermStatusBarClaudeCodeComponent.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = iTermStatusBarClaudeCodeComponent.swift; sourceTree = "<group>"; };
 		551CEFF56A53034E3FC7598A /* CCGitBaseSelectorItem.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CCGitBaseSelectorItem.swift; sourceTree = "<group>"; };
 		55709E18A1109F8DFD044E17 /* CompanionPairingController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CompanionPairingController.swift; sourceTree = "<group>"; };
 		57EF08786C9D79C55CDAC970 /* iTermCharacterSets.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = iTermCharacterSets.m; sourceTree = "<group>"; };
@@ -6667,6 +6670,7 @@
 		5F544D6F2B98C16911CCFCC2 /* CompanionWireVectors.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CompanionWireVectors.swift; path = Companion/CompanionCore/Tests/CompanionProtocolTests/CompanionWireVectors.swift; sourceTree = SOURCE_ROOT; };
 		60884ED8C599CCA130F47597 /* iTermGitStringMaker.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = iTermGitStringMaker.m; sourceTree = "<group>"; };
 		61827F01924DF945272653E4 /* AddClippingPanel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AddClippingPanel.swift; sourceTree = "<group>"; };
+		61D89C465BB288CE41607C3F /* ClaudeCodeStatusPopoverViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ClaudeCodeStatusPopoverViewController.swift; sourceTree = "<group>"; };
 		61DE2C181D86B1F93619B375 /* iTermSessionNameBuiltInFunction.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = iTermSessionNameBuiltInFunction.swift; sourceTree = "<group>"; };
 		625C956DD832F4FD0D8F9715 /* PrivateIPChecker.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PrivateIPChecker.swift; sourceTree = "<group>"; };
 		6373295DEB74E8DFC995A362 /* iTermAdapterSettingsRevealHelper.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = iTermAdapterSettingsRevealHelper.swift; sourceTree = "<group>"; };
@@ -12718,6 +12722,8 @@
 				A6F1B3AA268FCAC000546767 /* iTermStatusBarTriggersComponent.swift */,
 				A60E045E26DEEA5100DD162B /* MiniFilterViewController.swift */,
 				A60E045C26DED32A00DD162B /* StatusBarFilterComponent.swift */,
+				54AADA79898323919FF35EDE /* iTermStatusBarClaudeCodeComponent.swift */,
+				61D89C465BB288CE41607C3F /* ClaudeCodeStatusPopoverViewController.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -22099,6 +22105,8 @@
 				47AADA0847775ED4D709B982 /* iTermSessionRegistryFilter.m in Sources */,
 				FD77FCBDBC230985CEA02117 /* iTermSpawnTermCapabilities.m in Sources */,
 				A674A98C783E11D507B79FD8 /* iTermSpawnTermCapabilities.h in Sources */,
+				4ECF56E6C2076558C12E647B /* iTermStatusBarClaudeCodeComponent.swift in Sources */,
+				D527FCD24E10A4FD16FB364E /* ClaudeCodeStatusPopoverViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -39,6 +39,7 @@ KNOWN_FLAGS: dict[str, str] = {
     "broker": "Tier 2 external broker (durable sqlite mailbox/registry/state/ack over a unix socket).",
     "review": "Per-agent diff/review surface (show worktree diff vs base; approve->merge / request-changes).",
     "tmux": "Tier 3 tmux -CC persistence: spawn agents inside a native tmux -CC session so windows/agents survive quit/crash and can be reattached.",
+    "claude_statusbar": "Claude Code session status aggregator status-bar component (Waiting/Working/Idle across all windows).",
 }
 
 
