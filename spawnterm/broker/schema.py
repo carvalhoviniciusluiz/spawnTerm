@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 # Bump when a new migration is appended below. current == len(MIGRATIONS).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Busy timeout for lock contention across processes (WAL still serializes
 # writers). Seconds for the sqlite3.connect timeout; ms for the PRAGMA.
@@ -46,6 +46,31 @@ _META_DDL = (
 # Never edit a shipped migration in place — always add the next number.
 MIGRATIONS: dict[int, list[str]] = {
     1: [],
+    # v2 (#35 mailbox): durable per-agent message queue + ack cursor. The
+    # ``messages`` table is the exactly-once-per-cursor delivery log; the
+    # ``ack_cursors`` table records each recipient's high-water acked id. See
+    # spawnterm/broker/mailbox.py for the ordering/replay/ack semantics.
+    2: [
+        "CREATE TABLE IF NOT EXISTS messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  sender TEXT NOT NULL,"
+        "  recipient TEXT NOT NULL,"
+        "  body TEXT NOT NULL,"
+        "  created_at REAL NOT NULL,"
+        "  state TEXT NOT NULL DEFAULT 'pending'"
+        ")",
+        # Per-recipient ordered fetch (poll walks recipient rows by ascending id).
+        "CREATE INDEX IF NOT EXISTS idx_messages_recipient_id"
+        "  ON messages(recipient, id)",
+        # Un-acked scan for replay (recipient + state, still ordered by id).
+        "CREATE INDEX IF NOT EXISTS idx_messages_recipient_state_id"
+        "  ON messages(recipient, state, id)",
+        "CREATE TABLE IF NOT EXISTS ack_cursors ("
+        "  agent TEXT NOT NULL PRIMARY KEY,"
+        "  cursor INTEGER NOT NULL DEFAULT 0,"
+        "  updated_at REAL NOT NULL"
+        ")",
+    ],
 }
 
 
