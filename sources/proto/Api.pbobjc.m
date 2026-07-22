@@ -12626,6 +12626,7 @@ typedef struct ITMListSessionsRequest__storage_ {
 @dynamic hasSession, session;
 @dynamic hasText, text;
 @dynamic hasSuppressBroadcast, suppressBroadcast;
+@dynamic hasWaitForDispatch, waitForDispatch;
 
 typedef struct ITMSendTextRequest__storage_ {
   uint32_t _has_storage_[1];
@@ -12666,6 +12667,15 @@ typedef struct ITMSendTextRequest__storage_ {
         .flags = GPBFieldOptional,
         .dataType = GPBDataTypeBool,
       },
+      {
+        .name = "waitForDispatch",
+        .dataTypeSpecific.clazz = Nil,
+        .number = ITMSendTextRequest_FieldNumber_WaitForDispatch,
+        .hasIndex = 4,
+        .offset = 5,  // Stored in _has_storage_ to save space.
+        .flags = GPBFieldOptional,
+        .dataType = GPBDataTypeBool,
+      },
     };
     GPBDescriptor *localDescriptor =
         [GPBDescriptor allocDescriptorForClass:[ITMSendTextRequest class]
@@ -12690,6 +12700,7 @@ typedef struct ITMSendTextRequest__storage_ {
 @implementation ITMSendTextResponse
 
 @dynamic hasStatus, status;
+@dynamic hasDispatched, dispatched;
 
 typedef struct ITMSendTextResponse__storage_ {
   uint32_t _has_storage_[1];
@@ -12710,6 +12721,15 @@ typedef struct ITMSendTextResponse__storage_ {
         .offset = (uint32_t)offsetof(ITMSendTextResponse__storage_, status),
         .flags = (GPBFieldFlags)(GPBFieldOptional | GPBFieldHasEnumDescriptor),
         .dataType = GPBDataTypeEnum,
+      },
+      {
+        .name = "dispatched",
+        .dataTypeSpecific.clazz = Nil,
+        .number = ITMSendTextResponse_FieldNumber_Dispatched,
+        .hasIndex = 1,
+        .offset = 2,  // Stored in _has_storage_ to save space.
+        .flags = GPBFieldOptional,
+        .dataType = GPBDataTypeBool,
       },
     };
     GPBDescriptor *localDescriptor =

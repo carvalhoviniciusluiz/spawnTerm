@@ -1543,6 +1543,13 @@ message SendTextRequest {
 
   // If set, input will not be broadcast when broadcasting is on.
   optional bool suppress_broadcast = 3;
+
+  // spawnTerm extension (fork-only): if set, the response is deferred until the
+  // text has been handed off to the session's write pipeline (PTYTask) rather
+  // than returned immediately on acceptance. See SendTextResponse.dispatched for
+  // the exact guarantee. When absent/false, behavior is unchanged: the response
+  // is returned as soon as the request is accepted.
+  optional bool wait_for_dispatch = 4;
 }
 
 message SendTextResponse {
@@ -1552,6 +1559,14 @@ message SendTextResponse {
   }
 
   optional Status status = 1;
+
+  // spawnTerm extension (fork-only): true when wait_for_dispatch was honored and
+  // the text was flushed out of the session's own deferral queues into the
+  // PTYTask write layer (i.e. handed to the write pipeline). This does NOT
+  // guarantee the bytes reached the kernel PTY. For a multi-session "all" send,
+  // it is true once every targeted session has been dispatched. It is absent/
+  // false when wait_for_dispatch was not requested.
+  optional bool dispatched = 2;
 }
 
 message Size {

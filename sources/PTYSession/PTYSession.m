@@ -726,6 +726,10 @@ typedef NS_ENUM(NSUInteger, PTYSessionTurdType) {
     NSDictionary *_savedBrowserState;
     // (unique ID, hostname)
     NSMutableData *_sshWriteQueue;
+    // Completion blocks (copied) awaiting the drain of _sshWriteQueue. Fired in
+    // order once the queued SSH writes are handed to PTYTask. See
+    // writeTask:completion:.
+    NSMutableArray<void (^)(void)> *_sshWriteQueueCompletions;
     BOOL _jiggleUponAttach;
 
     // Are we currently enqueuing the bytes to write a focus report?
@@ -737,6 +741,9 @@ typedef NS_ENUM(NSUInteger, PTYSessionTurdType) {
     // If true the session was just created and an offscreen mark alert would be annoying.
     BOOL _temporarilySuspendOffscreenMarkAlerts;
     NSMutableArray<NSData *> *_dataQueue;
+    // Completion blocks (copied) awaiting the drain of _dataQueue. Fired in order
+    // once the deferred writes are handed to PTYTask. See writeTask:completion:.
+    NSMutableArray<void (^)(void)> *_dataQueueCompletions;
 
     BOOL _promptStateAllowsAutoComposer;
     NSArray<ScreenCharArray *> *_desiredComposerPrompt;
@@ -1246,6 +1253,7 @@ ITERM_WEAKLY_REFERENCEABLE
     [_pasteboardReporter release];
     [_conductor release];
     [_sshWriteQueue release];
+    [_sshWriteQueueCompletions release];
     [_savedBrowserState release];
     [_lastNonFocusReportingWrite release];
     [_lastFocusReportDate release];
@@ -1253,6 +1261,7 @@ ITERM_WEAKLY_REFERENCEABLE
     [_commandQueue release];
     [_pendingJumps release];
     [_dataQueue release];
+    [_dataQueueCompletions release];
     [_pendingPublishRequests release];
     [_desiredComposerPrompt release];
     [_localFileChecker release];
@@ -3924,6 +3933,28 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
         forceEncoding:(BOOL)forceEncoding
          canBroadcast:(BOOL)canBroadcast
             reporting:(BOOL)reporting {
+    [self writeTaskImpl:string
+               encoding:optionalEncoding
+          forceEncoding:forceEncoding
+           canBroadcast:canBroadcast
+              reporting:reporting
+             completion:nil];
+}
+
+// Runs `completion` now if non-nil. Used by writeTaskImpl:… paths that hand the
+// bytes off synchronously (immediate write, broadcast, exited/no-op sessions).
+static void PTYSessionRunWriteCompletion(void (^completion)(void)) {
+    if (completion) {
+        completion();
+    }
+}
+
+- (void)writeTaskImpl:(NSString *)string
+             encoding:(NSStringEncoding)optionalEncoding
+        forceEncoding:(BOOL)forceEncoding
+         canBroadcast:(BOOL)canBroadcast
+            reporting:(BOOL)reporting
+           completion:(void (^)(void))completion {
     const NSStringEncoding encoding = forceEncoding ? optionalEncoding : _screen.terminalEncoding;
     if (gDebugLogging) {
         NSArray *stack = [NSThread callStackSymbols];
@@ -3938,7 +3969,8 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
     }
     if (string.length == 0) {
         DLog(@"String length is 0");
-        // Abort early so the surrogate hack works.
+        // Abort early so the surrogate hack works. Nothing to dispatch.
+        PTYSessionRunWriteCompletion(completion);
         return;
     }
     if (canBroadcast && _screen.terminalSendReceiveMode && !self.isTmuxClient && !self.isTmuxGateway) {
@@ -3958,6 +3990,10 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
         [[_delegate realParentWindow] sendInputToAllSessions:string
                                                     encoding:optionalEncoding
                                                forceEncoding:forceEncoding];
+        // The text has been handed to the parent window for broadcast; we do not
+        // track the child sessions' individual write pipelines, so treat the
+        // hand-off as dispatched.
+        PTYSessionRunWriteCompletion(completion);
     } else if (!_exited) {
         // Send to only this session
         if (canBroadcast) {
@@ -3974,6 +4010,8 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
                 _sshWriteQueue = [[NSMutableData alloc] init];
             }
             [_sshWriteQueue appendData:data];
+            // Deferred until the SSH conductor drains the queue.
+            [self enqueueWriteCompletion:completion into:&_sshWriteQueueCompletions];
             return;
         }
         if ((_buffering || _screen.sendingIsBlocked || _bracketedPastePending > 0) && !reporting) {
@@ -3982,10 +4020,44 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
                 _dataQueue = [[NSMutableArray alloc] init];
             }
             [_dataQueue addObject:data];
+            // Deferred until sendDataQueue drains the queue.
+            [self enqueueWriteCompletion:completion into:&_dataQueueCompletions];
         } else {
             DLog(@"Write immediately: %@", [data stringWithEncoding:NSUTF8StringEncoding]);
             [self writeData:data];
+            // Bytes handed to PTYTask synchronously.
+            PTYSessionRunWriteCompletion(completion);
         }
+    } else {
+        // Session has exited: the request is resolved but nothing is dispatched.
+        PTYSessionRunWriteCompletion(completion);
+    }
+}
+
+// Copies `completion` (if non-nil) into the array at `arrayPtr`, lazily
+// allocating the array. The stored blocks are fired in order when the matching
+// deferral queue drains. See -runAndClearWriteCompletions:.
+- (void)enqueueWriteCompletion:(void (^)(void))completion
+                          into:(NSMutableArray<void (^)(void)> **)arrayPtr {
+    if (!completion) {
+        return;
+    }
+    if (!*arrayPtr) {
+        *arrayPtr = [[NSMutableArray alloc] init];
+    }
+    [*arrayPtr addObject:[[completion copy] autorelease]];
+}
+
+// Fires every completion in `completions` in order, then empties it. Safe if
+// nil/empty.
+- (void)runAndClearWriteCompletions:(NSMutableArray<void (^)(void)> *)completions {
+    if (completions.count == 0) {
+        return;
+    }
+    NSArray<void (^)(void)> *snapshot = [[completions copy] autorelease];
+    [completions removeAllObjects];
+    for (void (^completion)(void) in snapshot) {
+        completion();
     }
 }
 
@@ -4061,21 +4133,50 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
     [self writeTaskNoBroadcast:string encoding:_screen.terminalEncoding forceEncoding:NO reporting:NO];
 }
 
+- (void)writeTaskNoBroadcast:(NSString *)string completion:(void (^)(void))completion {
+    [self writeTaskNoBroadcast:string
+                      encoding:_screen.terminalEncoding
+                 forceEncoding:NO
+                     reporting:NO
+                    completion:completion];
+}
+
 - (void)writeTaskNoBroadcast:(NSString *)string
                     encoding:(NSStringEncoding)encoding
                forceEncoding:(BOOL)forceEncoding
                    reporting:(BOOL)reporting {
+    [self writeTaskNoBroadcast:string
+                      encoding:encoding
+                 forceEncoding:forceEncoding
+                     reporting:reporting
+                    completion:nil];
+}
+
+- (void)writeTaskNoBroadcast:(NSString *)string
+                    encoding:(NSStringEncoding)encoding
+               forceEncoding:(BOOL)forceEncoding
+                   reporting:(BOOL)reporting
+                  completion:(void (^)(void))completion {
     if (_conductor.handlesKeystrokes) {
         [_conductor sendKeys:[string dataUsingEncoding:encoding]];
+        // Handed to the conductor's keystroke channel.
+        PTYSessionRunWriteCompletion(completion);
         return;
     } else if (self.tmuxMode == TMUX_CLIENT) {
         // tmux doesn't allow us to abuse the encoding, so this can cause the wrong thing to be
         // sent (e.g., in mouse reporting).
         [[_tmuxController gateway] sendKeys:string
                                toWindowPane:self.tmuxPane];
+        // Handed to the tmux gateway.
+        PTYSessionRunWriteCompletion(completion);
         return;
     }
-    [self writeTaskImpl:string encoding:encoding forceEncoding:forceEncoding canBroadcast:NO reporting:reporting];
+    [self writeTaskImpl:string
+               encoding:encoding
+          forceEncoding:forceEncoding
+           canBroadcast:NO
+              reporting:reporting
+             completion:completion];
 }
 
 - (void)performTmuxCommand:(NSString *)command {
@@ -4165,6 +4266,15 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
     [self writeTask:string encoding:_screen.terminalEncoding forceEncoding:NO reporting:NO];
 }
 
+- (void)writeTask:(NSString *)string completion:(void (^)(void))completion {
+    [self writeTask:string
+           encoding:_screen.terminalEncoding
+      forceEncoding:NO
+       canBroadcast:YES
+          reporting:NO
+         completion:completion];
+}
+
 // If forceEncoding is YES then optionalEncoding will be used regardless of the session's preferred
 // encoding. If it is NO then the preferred encoding is used. This is necessary because this method
 // might send the string off to the window to get broadcast to other sessions which might have
@@ -4185,6 +4295,20 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
     forceEncoding:(BOOL)forceEncoding
      canBroadcast:(BOOL)canBroadcast
         reporting:(BOOL)reporting {
+    [self writeTask:string
+           encoding:optionalEncoding
+      forceEncoding:forceEncoding
+       canBroadcast:canBroadcast
+          reporting:reporting
+         completion:nil];
+}
+
+- (void)writeTask:(NSString *)string
+         encoding:(NSStringEncoding)optionalEncoding
+    forceEncoding:(BOOL)forceEncoding
+     canBroadcast:(BOOL)canBroadcast
+        reporting:(BOOL)reporting
+       completion:(void (^)(void))completion {
     NSStringEncoding encoding = forceEncoding ? optionalEncoding : _screen.terminalEncoding;
     if (self.tmuxMode == TMUX_CLIENT || _conductor.handlesKeystrokes || _connectingSSH) {
         [self setBell:NO];
@@ -4203,6 +4327,8 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
         }
         PTYScroller* ptys = (PTYScroller*)[_view.scrollview verticalScroller];
         [ptys setUserScroll:NO];
+        // Handed to broadcast/conductor/connectingSSH-queue/tmux route.
+        PTYSessionRunWriteCompletion(completion);
         return;
     } else if (self.tmuxMode == TMUX_GATEWAY) {
         // Use keypresses for tmux gateway commands for development and debugging.
@@ -4210,6 +4336,7 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
             unichar unicode = [string characterAtIndex:i];
             [self handleCharacterPressedInTmuxGateway:unicode];
         }
+        PTYSessionRunWriteCompletion(completion);
         return;
     }
     self.currentMarkOrNotePosition = nil;
@@ -4217,7 +4344,8 @@ webViewConfiguration:(WKWebViewConfiguration *)webViewConfiguration
                encoding:encoding
           forceEncoding:forceEncoding
            canBroadcast:canBroadcast
-              reporting:reporting];
+              reporting:reporting
+             completion:completion];
 }
 
 // This is run in PTYTask's thread. It parses the input here and then queues an async task to run
@@ -15499,6 +15627,7 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
         [self writeData:data];
     }
     [_dataQueue removeAllObjects];
+    [self runAndClearWriteCompletions:_dataQueueCompletions];
 }
 
 // Called when the expectation for the first chunk of a bracketed paste is ready.
@@ -19266,6 +19395,7 @@ static const NSTimeInterval PTYSessionFocusReportBellSquelchTimeIntervalThreshol
     [self writeData:_sshWriteQueue];
     [_sshWriteQueue release];
     _sshWriteQueue = nil;
+    [self runAndClearWriteCompletions:_sshWriteQueueCompletions];
 }
 
 - (void)unhookSSHConductor {
@@ -24578,6 +24708,9 @@ static NSString *IT2AuthorizationAnnouncementIdentifier(NSString *guid) {
     }];
     [self unhookSSHConductor];
     [_sshWriteQueue setLength:0];
+    // The conductor died and the queued bytes were dropped; still resolve any
+    // pending write completions so callers waiting on dispatch do not hang.
+    [self runAndClearWriteCompletions:_sshWriteQueueCompletions];
 }
 
 - (void)conductorStopQueueingInput {

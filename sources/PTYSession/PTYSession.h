@@ -893,10 +893,25 @@ webViewConfiguration:(nullable WKWebViewConfiguration *)webViewConfiguration
 
 // Writes output as though a key was pressed. Broadcast allowed. Supports tmux integration properly.
 - (void)writeTask:(NSString *)string;
+
+// Like writeTask: but invokes `completion` (on the main queue) once the text has
+// been handed off to the session's write pipeline. For text that is deferred
+// (e.g. while the SSH conductor is queueing writes, or while output is buffered/
+// blocked) the completion fires when the deferral queue drains and the bytes
+// reach PTYTask. For text routed elsewhere (tmux client, conductor keystrokes,
+// broadcast fan-out) it fires once the text has been handed to that route. This
+// does NOT guarantee the bytes reached the kernel PTY. `completion` may be nil.
+- (void)writeTask:(NSString *)string completion:(void (^)(void))completion;
+
 - (void)enterUsername:(NSString *)username;
 
 // Writes output as though a key was pressed. Does not broadcast. Supports tmux integration properly.
 - (void)writeTaskNoBroadcast:(NSString *)string;
+
+// Like writeTaskNoBroadcast: but invokes `completion` (on the main queue) once
+// the text has been handed off to the session's write pipeline. See
+// writeTask:completion: for the exact dispatch guarantee. `completion` may be nil.
+- (void)writeTaskNoBroadcast:(NSString *)string completion:(void (^)(void))completion;
 
 // Write with a particular encoding. If the encoding is just session.terminal.encoding then pass
 // NO for `forceEncoding` and the terminal's encoding will be used instead of `optionalEncoding`.
