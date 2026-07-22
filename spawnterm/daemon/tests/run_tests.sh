@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Run the spawnTerm daemon unit tests (#26, #28). Pure Python; no iterm2
-# required. Auto-discovers test_*.py, so registry/envelope/gate/router are all
-# included.
+# Run the spawnTerm daemon unit tests. Pure Python; no iterm2 required.
+# Covers: registry (#26), envelope (#26), flag gate/purity (#26), router (#28,
+# test_router.py), and the status-bar dashboard formatter (#29, test_dashboard.py).
+# New test_*.py files are auto-discovered below.
 #
 # Usage: bash spawnterm/daemon/tests/run_tests.sh
 set -u

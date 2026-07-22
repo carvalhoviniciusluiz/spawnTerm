@@ -125,6 +125,57 @@ parses and logs each ingested envelope but does **not** route. Turn it on with
 > agent is busy. The durable inbox + ack path is **Tier 2 (#4)** — precisely the
 > gap this best-effort relay leaves open.
 
+## Agent dashboard (status-bar component, #29)
+
+The daemon can register a custom **iTerm2 status-bar component** that shows, per
+session, the agent's role + lifecycle status (+ task if it fits), e.g.
+`▶ backend: busy — build #29`. It re-renders whenever the session's
+`user.agent_role` / `user.agent_status` / `user.agent_task` variables change.
+
+Statuses map to a glyph + the colorblind-safe Okabe-Ito lifecycle palette (the
+same values as `spawnterm/emit/docs/colors.md`, #8), with a shape-distinct glyph
+so the state reads without color:
+
+| Status | Glyph | Color |
+| --- | --- | --- |
+| `busy` | `▶` | `0072B2` (blue) |
+| `blocked` | `⚠` | `E69F00` (orange) |
+| `done` | `✓` | `009E73` (bluish green) |
+| `idle` | `○` | `999999` (gray) |
+
+A missing role degrades to `agent`; a missing or unrecognized status degrades to
+`idle`; the task is truncated with `…` when it nearly fits and omitted when there
+is no room.
+
+### Gate: `spawnterm.status_board` (default OFF)
+
+The component is registered **only** when the `spawnterm.status_board` feature
+flag is ON — the same flag the Tier 0 emitter uses — checked through the shared
+`spawnterm-flag` helper (#11), not a new flag. When it is OFF (or the helper is
+unreachable) the component is **not registered** and nothing is shown. Bypass
+for local testing with `SPAWNTERM_FORCE=1`.
+
+```sh
+spawnterm-flag enable spawnterm.status_board   # allow the dashboard component
+```
+
+### Add it to the status bar
+
+Once the daemon is running with the flag on, add the component in iTerm2:
+
+**iTerm2 → Settings → Profiles → Session → Status bar → Configure Status Bar**,
+then drag **“spawnTerm Agent”** from the Components list into the layout.
+
+### Where the code lives
+
+All of #29 lives in `dashboard.py`: the **pure** formatter core
+(`format_component`, `style_for_status`, `PALETTE` — no `iterm2` import,
+unit-tested in `tests/test_dashboard.py`) plus the `iterm2.StatusBarComponent`
+wiring, which imports `iterm2` **lazily** inside the wiring functions. The daemon
+touches it through a single hook: `spawnterm_daemon.py` calls
+`maybe_register_dashboard(connection, logger)`, which no-ops when the gate is
+closed.
+
 ## Architecture (testability)
 
 iTerm2 is not available in CI, so the real logic is **pure** and importable
@@ -135,6 +186,7 @@ without the `iterm2` package:
 | `registry.py` | **pure** | `Registry` + `SessionRecord`: add/remove/update/query + idle transition. |
 | `envelope.py` | **pure** | `parse_envelope` → `Envelope` / `ParseResult`. |
 | `router.py` | **pure** | `route` / `route_if_enabled` → `RoutingDecision`; `messaging_enabled` gate. |
+| `dashboard.py` | pure core + lazy `import iterm2` | `format_component` / `PALETTE` (pure, tested) + the `StatusBarComponent` wiring (#29). |
 | `adapter.py` | lazy `import iterm2` | `DaemonAdapter`: translates iTerm2 monitor events into registry calls; delivers routed text. |
 | `spawnterm_daemon.py` | lazy `import iterm2` | entry point: CLI, flag gate, `run_forever`. |
 
