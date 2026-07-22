@@ -65,13 +65,14 @@ class TestInitialize(unittest.TestCase):
 
 
 class TestToolsList(unittest.TestCase):
-    def test_lists_six_tools_with_schemas(self):
+    def test_lists_tools_with_schemas(self):
         resp = rpc.handle_request(req("tools/list"), make_deps())
         tool_list = resp["result"]["tools"]
-        self.assertEqual(len(tool_list), 6)
+        self.assertEqual(len(tool_list), 7)
         names = [t["name"] for t in tool_list]
         self.assertEqual(
-            names, ["spawn", "assign", "handoff", "send_message", "status", "list_agents"]
+            names,
+            ["spawn", "assign", "handoff", "send_message", "status", "list_agents", "help"],
         )
         for t in tool_list:
             self.assertEqual(t["inputSchema"]["type"], "object")
@@ -131,6 +132,42 @@ class TestToolsCall(unittest.TestCase):
         self.assertEqual(resp["result"]["structuredContent"]["error"], "bad_request")
 
 
+class TestHelpAndResources(unittest.TestCase):
+    def test_help_tool_returns_guide_text(self):
+        resp = rpc.handle_request(
+            req("tools/call", {"name": "help", "arguments": {}}), make_deps()
+        )
+        result = resp["result"]
+        self.assertFalse(result["isError"])
+        self.assertIn("spawnTerm", result["structuredContent"]["guide"])
+
+    def test_initialize_advertises_resources_and_instructions(self):
+        resp = rpc.handle_request(req("initialize", {}), make_deps())
+        result = resp["result"]
+        self.assertIn("resources", result["capabilities"])
+        self.assertIn("help", result["instructions"])
+
+    def test_resources_list_has_the_guide(self):
+        resp = rpc.handle_request(req("resources/list"), make_deps())
+        resources = resp["result"]["resources"]
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0]["uri"], rpc.tools.GUIDE_URI)
+
+    def test_resources_read_returns_guide_text(self):
+        resp = rpc.handle_request(
+            req("resources/read", {"uri": rpc.tools.GUIDE_URI}), make_deps()
+        )
+        contents = resp["result"]["contents"]
+        self.assertEqual(len(contents), 1)
+        self.assertIn("spawnterm-flag", contents[0]["text"])
+
+    def test_resources_read_unknown_uri_is_empty(self):
+        resp = rpc.handle_request(
+            req("resources/read", {"uri": "spawnterm://nope"}), make_deps()
+        )
+        self.assertEqual(resp["result"]["contents"], [])
+
+
 class TestNotificationsAndErrors(unittest.TestCase):
     def test_notification_gets_no_response(self):
         # No "id" => notification => no reply.
@@ -178,7 +215,7 @@ class TestDispatchLine(unittest.TestCase):
     def test_roundtrip_tools_list_line(self):
         line = rpc.dispatch_line(json.dumps(req("tools/list")), make_deps())
         obj = json.loads(line)
-        self.assertEqual(len(obj["result"]["tools"]), 6)
+        self.assertEqual(len(obj["result"]["tools"]), 7)
 
 
 if __name__ == "__main__":

@@ -139,6 +139,26 @@ assert_contains "ON: branch under spawnterm/"         "branch=spawnterm/worker-1
 assert_contains "ON: user command preserved after exports" "'claude'" "$iso_on"
 
 echo
+echo "--- 6c. capability-guide header (#56) ---"
+# By default the new session gets a 1-line pointer to the guide (spawnterm help),
+# both flagged in the plan and present in the session commands.
+guide_out="$(sh "$SPAWN" --role x --dry-run -- true)"
+assert_contains "guide header on by default (plan line)" "guide header : on" "$guide_out"
+assert_contains "guide header printed into the session"  "run: spawnterm help" "$guide_out"
+# The header is a pointer, NOT the whole guide (no capability tables dumped).
+case "$guide_out" in
+	*"Known flags:"*|*"| flag |"*) red "spawn dumped guide content (should only point at it)" ;;
+	*)                             green "spawn points at the guide, does not dump it" ;;
+esac
+# --no-guide opts out: no header line in the plan or the session commands.
+noguide_out="$(sh "$SPAWN" --role x --no-guide --dry-run -- true)"
+assert_contains "--no-guide reflected in plan" "guide header : off (--no-guide)" "$noguide_out"
+case "$noguide_out" in
+	*"run: spawnterm help"*) red "--no-guide still injected the guide header" ;;
+	*)                       green "--no-guide omits the guide header" ;;
+esac
+
+echo
 echo "--- 6. generated AppleScript parses ---"
 if command -v osacompile >/dev/null 2>&1; then
 	AS_FILE="$(mktemp).applescript"

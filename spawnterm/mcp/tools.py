@@ -51,6 +51,22 @@ if str(_DAEMON_DIR) not in sys.path:
 
 from spawn import SpawnPlan, SpawnPlanError, build_spawn_plan  # type: ignore  # noqa: E402
 
+# The consolidated agent capability guide (#56) is the single source of truth.
+# The MCP surface exposes it WITHOUT duplicating a copy: the ``help`` tool (and
+# the ``resources``/``instructions`` surfaces in ``rpc``) read this one file.
+GUIDE_PATH = Path(__file__).resolve().parent.parent / "AGENT_GUIDE.md"
+GUIDE_URI = "spawnterm://guide"
+
+
+def read_guide() -> str:
+    """Return the text of ``AGENT_GUIDE.md`` (the single source of truth).
+
+    Reads the sibling doc resolved relative to the ``spawnterm/`` root. Raises
+    ``FileNotFoundError`` if the guide is missing (a packaging error) — callers
+    that must never fail (the server layer) catch it and report a tool error.
+    """
+    return GUIDE_PATH.read_text(encoding="utf-8")
+
 
 # --------------------------------------------------------------------------- #
 # Injected dependencies (the only impure surfaces, both mockable in tests)
@@ -316,6 +332,20 @@ def handle_list_agents(arguments: dict, deps: Deps) -> dict:
     return _broker_result(resp)
 
 
+def handle_help(arguments: dict, deps: Deps) -> dict:
+    """Return the consolidated capability guide (#56) as text.
+
+    Reads :data:`GUIDE_PATH` (the single source of truth) and returns its full
+    text — no duplication, no broker/spawn dependency. A missing guide file is a
+    packaging error, reported as a structured failure rather than a crash.
+    """
+    try:
+        text = read_guide()
+    except OSError as exc:
+        return {"ok": False, "error": "guide_unavailable", "message": str(exc)}
+    return _ok(guide=text)
+
+
 def _broker_result(resp: Any) -> dict:
     """Normalize a raw broker response into a tool result dict.
 
@@ -512,6 +542,20 @@ _register(
             required=[],
         ),
         handler=handle_list_agents,
+    )
+)
+
+
+_register(
+    ToolSpec(
+        name="help",
+        description=(
+            "Return the spawnTerm agent capability guide (AGENT_GUIDE.md) — the "
+            "single source of truth for every capability, its feature flag, its "
+            "command/MCP tool, and a one-line example. Takes no arguments."
+        ),
+        input_schema=_obj({}, required=[]),
+        handler=handle_help,
     )
 )
 

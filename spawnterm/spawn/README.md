@@ -69,6 +69,20 @@ escape codes of its own. It finds the emit helper next to itself
 (`../emit/spawnterm-emit`) or on `PATH`, and resolves it to an absolute path so
 the call works regardless of the new session's `PATH`.
 
+### Capability-guide header (issue #56)
+
+After the identity emits, `spawnterm-spawn` prints a **one-line** pointer into the
+new session so a fresh agent learns the spawnTerm capabilities exist:
+
+```
+# spawnTerm capabilities available — run: spawnterm help
+```
+
+It points at the guide ([`../AGENT_GUIDE.md`](../AGENT_GUIDE.md), served by
+`spawnterm help`); it does **not** dump the guide. The header is not gated (it is
+a hint, not a capability). Opt out with `--no-guide`. The `--dry-run` output shows
+a `guide header : on|off` line and the injected `printf` in the session commands.
+
 ### Worktree + port/namespace isolation (issue #13 — gated OFF by default)
 
 Parallel agents in separate git worktrees still collide on ports/DBs/services.

@@ -7,6 +7,19 @@ Orchestrate multiple AI coding agents running in separate **iTerm2** tabs/panes 
 > This directory (`spawnterm/`) holds the project's own tooling. The rest of the repo is a **fork of
 > `gnachman/iTerm2`**, touched only for **Tier 4** (upstream core PRs). See root `AGENTS.md`.
 
+## Capability guide (start here)
+
+Every capability is a feature flag, **default OFF**. The one place to discover what exists and how to
+use it is [`AGENT_GUIDE.md`](AGENT_GUIDE.md) — a terse, agent-facing cheat-sheet (flag → command/MCP
+tool → example). It is the **single source of truth**; three surfaces read it (no duplication):
+
+- **`spawnterm help`** (or `./spawnterm-help`) — prints the guide plus a live "Currently enabled" list
+  from `spawnterm-flag list`. Never gated — help always works.
+- **MCP** — the `help` tool returns the guide; it is also exposed via `resources/read` and the
+  `initialize` instructions (see `mcp/`).
+- **Spawn** — `spawnterm-spawn` injects a one-line pointer (`run: spawnterm help`) into each new
+  agent's tab (opt out with `--no-guide`).
+
 ## Why
 Today, spawning/coordinating agents across terminal tabs is manual and lossy: no view of who is
 working/blocked/done, no reliable cross-tab messaging, handoffs are files someone must find, and a
