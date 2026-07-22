@@ -97,6 +97,21 @@ python3 "$LANG_PY" set en >/dev/null
 assert_eq "shell get after py set en" "$("$LANG_SH" get)"       "en"
 assert_eq "py    get after py set en" "$(python3 "$LANG_PY" get)" "en"
 
+echo "== lang current = RAW stored value (system NOT resolved) =="
+reset
+assert_eq "shell current default (no config)" "$("$LANG_SH" current)"        "en"
+assert_eq "py    current default (no config)" "$(python3 "$LANG_PY" current)" "en"
+"$LANG_SH" set pt-BR >/dev/null
+assert_eq "shell current after set pt-BR" "$("$LANG_SH" current)"        "pt-BR"
+assert_eq "py    current after set pt-BR" "$(python3 "$LANG_PY" current)" "pt-BR"
+# The key distinction from get: `current` reports "system" verbatim while `get`
+# would resolve it to en/pt-BR via the locale. Force a pt-* locale so a bug that
+# resolved instead of reporting raw would surface as pt-BR.
+"$LANG_SH" set system >/dev/null
+assert_eq "shell current after set system" "$(LANG=pt_BR.UTF-8 LC_ALL= "$LANG_SH" current)"        "system"
+assert_eq "py    current after set system" "$(LANG=pt_BR.UTF-8 LC_ALL= python3 "$LANG_PY" current)" "system"
+assert_eq "shell get resolves system->pt-BR" "$(LANG=pt_BR.UTF-8 LC_ALL= "$LANG_SH" get)" "pt-BR"
+
 echo "== set language PRESERVES an existing [features] table =="
 reset
 "$FLAG_SH" enable messaging >/dev/null

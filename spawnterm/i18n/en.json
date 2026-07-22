@@ -31,5 +31,7 @@
   "help.intro": "Print the capability guide, then a live list of currently enabled feature flags.",
   "help.enabled_section": "Currently enabled (live)",
   "help.no_flags": "No feature flags are enabled (all default OFF).",
-  "gate.off": "spawnterm.{0} is off. Enable it with: spawnterm-flag enable spawnterm.{0}"
+  "gate.off": "spawnterm.{0} is off. Enable it with: spawnterm-flag enable spawnterm.{0}",
+  "settings.language.label": "Language",
+  "settings.language.system": "System"
 }

@@ -81,12 +81,13 @@ USAGE = """usage: spawnterm-lang <command> [lang]
 
 Commands:
   get                  print the resolved active language (en or pt-BR)
+  current              print the RAW stored language (en/pt-BR/system)
   set <en|pt-BR|system>  set [settings] language (preserves [features])
   list                 print the available languages (catalogs found)
   -h, --help           show this help
 
 Config: $XDG_CONFIG_HOME/spawnterm/config.toml (falls back to ~/.config/...).
-Default language is en. get/list never create a file."""
+Default language is en. get/current/list never create a file."""
 
 
 def _err(msg: str) -> None:
@@ -108,6 +109,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "get":
         print(i18n.active_language())
+        return 0
+    if command == "current":
+        # RAW stored value (en/pt-BR/system), unresolved. See i18n.configured_language.
+        print(i18n.configured_language())
         return 0
     if command == "list":
         for lang in i18n.available_languages():
