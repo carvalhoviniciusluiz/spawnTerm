@@ -32,6 +32,7 @@ Start at **Epic #1**. Tiers, in order of dependency:
 ## Layout (planned)
 ```
 spawnterm/
+  flags/       # Foundation (#11) — per-user feature-flag framework (shell + Python), default OFF
   emit/        # Tier 0 — escape-code helpers (shell + Python) + triggers
   daemon/      # Tier 1 — iTerm2 Python API orchestration daemon
   broker/      # Tier 2 — sqlite/unix-socket broker
