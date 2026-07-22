@@ -106,6 +106,9 @@ Cherry-picked from open PRs on `gnachman/iTerm2` and adapted to our tree. The 3 
 ## Flags in the schema (all default OFF)
 `spawnterm.status_board · worktree_isolation · messaging · agent_inbox · cost_dashboard · janitor · mcp · daemon · broker · review · tmux · claude_statusbar · agent_menubar · codex_status`
 
+## i18n (English default + pt-BR, configurable) ✅
+`[settings] language` in `config.toml` (`en` default · `pt-BR` · `system`), read/written by `spawnterm-lang get|current|set|list`; strings via catalogs `spawnterm/i18n/{en,pt-BR}.json` + `spawnterm-i18n t <key>` (fallback active→en→key). The Settings → General → AI → spawnTerm pane has a **Language** popup (#67) and localizes the capability labels. Add a language = drop `xx.json` + add the popup item. Scope = spawnTerm's own surfaces (native iTerm2 UI is not localized). `spawnterm-flag` and `spawnterm-lang` preserve each other's config tables (`[features]`/`[settings]`). Foundation #66, picker #67.
+
 ## Discovering capabilities (agent-facing)
 `spawnterm help` (or `AGENT_GUIDE.md`, or the MCP `help` tool / `spawnterm://guide` resource) prints the consolidated cheat-sheet: each capability → its flag → command/MCP tool → example.
 
