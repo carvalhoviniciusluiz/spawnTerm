@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 import dispatch
+import mailbox  # noqa: F401 - registers the #35 send/poll/fetch/ack ops on import
 import protocol
 import schema
 

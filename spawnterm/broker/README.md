@@ -89,6 +89,53 @@ Unknown op → `{"ok":false,"error":{"code":"unknown_op",…}}`. A bad-shape req
 (invalid JSON / not an object) → `code:"bad_request"` too. A handler that raises
 → `code:"internal"`. **The server never crashes on bad input.**
 
+### Mailbox ops (#35) — durable per-agent queue + ack
+
+The mailbox is the spawnTerm differentiator: where tmux `send-keys` fanout is
+fire-and-forget and only ~70-80% reliable, this is a **db-backed queue with
+acknowledgement** — a message is durable across a broker restart and is
+re-delivered until the recipient acks it. Logic lives in `mailbox.py` (pure
+functions over a sqlite connection + thin `@register` handlers); the server
+wires the ops in by importing the module.
+
+| Op | Request | Response |
+| --- | --- | --- |
+| `send` | `{"op":"send","to":"agent1","from":"boss","body":"…"}` | `{"ok":true,"id":N}` |
+| `poll` / `fetch` | `{"op":"poll","agent":"agent1","since":N?}` | `{"ok":true,"messages":[…],"count":K}` |
+| `ack` | `{"op":"ack","agent":"agent1","msg_id":N}` | `{"ok":true,"acked":K,"cursor":N}` |
+
+Each message dict is `{"id":N,"from":"…","to":"…","body":"…","created_at":ts,"state":"delivered"}`.
+Missing/empty `to`/`from`/`agent`, a non-string `body`, a negative/non-integer
+`since`, or a bad `msg_id` all return `code:"bad_request"` — the server never
+crashes on malformed input.
+
+**Semantics** (durable in sqlite — nothing in memory, so no message is lost
+across a broker restart):
+
+* **Ordering** — strict per-recipient FIFO by the monotonic
+  `messages.id` (`INTEGER PRIMARY KEY AUTOINCREMENT`). `poll` returns a
+  recipient's messages ordered by ascending id.
+* **States** — a message moves `pending` → `delivered` → `acked`. `poll`
+  promotes the `pending` rows it hands out to `delivered`; `ack` moves rows up
+  to a cursor to `acked`.
+* **Replay** — `poll` returns every *un-acked* row (`pending` **or**
+  `delivered`), so a delivered-but-unacked message is re-returned on the next
+  `poll` (at-least-once) until it is acked. `since` is an optional exclusive id
+  floor for a caller that tracks its own cursor and wants to page forward past a
+  known id; omit it to replay everything un-acked.
+* **Ack cursor** — `ack(agent, msg_id)` is *up-to-cursor*: it acks every one of
+  the agent's messages with `id <= msg_id` and advances the per-agent high-water
+  cursor to `max(existing, msg_id)` (never rewinds). Acking is idempotent —
+  re-acking the same id acks nothing new (`acked:0`) and leaves the cursor put.
+* **Idempotent send** — we do **not** dedup by content: every `send` appends a
+  new row with a fresh id. Exactly-once is guaranteed at the **ack layer**, not
+  the send layer — an acked message (`id <= cursor`) is never returned again, so
+  delivery is exactly-once *per cursor+ack*. A caller that wants to suppress
+  duplicate work should ack.
+
+Schema: migration **v2** adds `messages` (with per-recipient `(recipient,id)`
+and `(recipient,state,id)` indexes) and `ack_cursors` (per-agent high-water id).
+
 ### op-dispatch API (extensibility)
 
 Ops are entries in a registry keyed by name. #35/#36/#37 add ops without touching
@@ -169,5 +216,8 @@ path resolution, sqlite schema (WAL is set, busy timeout, idempotent migration
 run twice + across reopen), wire-protocol round-trips + framing rejections,
 op-dispatch (ping/health routing, unknown/bad-shape errors, handler-exception
 isolation, `register` extensibility), the default-OFF `spawnterm.broker` flag
-gate + the no-`iterm2` purity guarantee, and an end-to-end unix-socket round-trip
-(server on a socket in a tmpdir, exercised by the real `BrokerClient`; no sleeps).
+gate + the no-`iterm2` purity guarantee, the #35 mailbox (send→poll→ack, replay
+of un-acked messages, strict FIFO ordering, ack-cursor advance/idempotency,
+durability across a db reopen, malformed-request errors), and an end-to-end
+unix-socket round-trip (server on a socket in a tmpdir, exercised by the real
+`BrokerClient`; no sleeps).
