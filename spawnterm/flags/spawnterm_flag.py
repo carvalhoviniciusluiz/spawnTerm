@@ -41,6 +41,7 @@ KNOWN_FLAGS: dict[str, str] = {
     "tmux": "Tier 3 tmux -CC persistence: spawn agents inside a native tmux -CC session so windows/agents survive quit/crash and can be reattached.",
     "claude_statusbar": "Claude Code session status aggregator status-bar component (Waiting/Working/Idle across all windows).",
     "agent_menubar": "Menu bar status item showing a live count badge of busy AI agents (imported from gnachman/iTerm2#670).",
+    "codex_status": "Show Codex CLI working/idle activity in the tab status by decoding the braille-spinner title prefix (imported from gnachman/iTerm2#673).",
 }
 
 

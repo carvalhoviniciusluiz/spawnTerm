@@ -47,6 +47,7 @@ Booleans only, under a single `[features]` table, with **quoted, fully-namespace
 "spawnterm.tmux" = false
 "spawnterm.claude_statusbar" = false
 "spawnterm.agent_menubar" = false
+"spawnterm.codex_status" = false
 ```
 
 The format is deliberately constrained so a pure-shell parser and Python's `tomllib`
@@ -79,6 +80,7 @@ Namespaced keys are `spawnterm.<capability>`. All default **`false`**.
 | `spawnterm.tmux` | Tier 3 tmux `-CC` persistence: spawn agents inside a native tmux `-CC` session so windows/agents survive quit/crash and can be reattached. |
 | `spawnterm.claude_statusbar` | Claude Code session status aggregator status-bar component (Waiting/Working/Idle across all windows), adapted from gnachman/iTerm2#648. |
 | `spawnterm.agent_menubar` | Menu bar status item with a live count badge of busy AI agents, adapted from gnachman/iTerm2#670. |
+| `spawnterm.codex_status` | Show Codex CLI working/idle activity in the tab status by decoding the braille-spinner title prefix, adapted from gnachman/iTerm2#673. |
 
 ## Default-OFF rule
 
