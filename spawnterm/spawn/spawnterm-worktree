@@ -1,0 +1,572 @@
+#!/usr/bin/env sh
+# spawnterm-worktree — per-agent git-worktree + $PORT / namespace isolation.
+#
+# spawnTerm Phase 2 (#13). scope:external-tooling — glue that shells out to
+# `git` and `spawnterm-flag`; it never modifies iTerm2 source. It is the
+# companion helper to `spawnterm-spawn` (#10): when the feature flag
+# `spawnterm.worktree_isolation` is ON, each spawned agent gets its OWN git
+# worktree on its OWN branch, plus a deterministic $SPAWNTERM_PORT and a
+# service/DB namespace prefix $SPAWNTERM_NS, so parallel agents never collide
+# on ports/DBs/services even though git worktrees only isolate files.
+#
+# ---------------------------------------------------------------------------
+# THE PURE ALLOCATOR (subcommand `plan`, no side effects)
+# ---------------------------------------------------------------------------
+# Given (repo root, agent id, role, task, base port, span) it derives, purely
+# and DETERMINISTICALLY (same inputs -> byte-identical outputs):
+#
+#   HASH       = sha1("<canonical-repo-path>|<agent-id>")  (hex)
+#   branch     = spawnterm/<slug>-<hash6>
+#                  slug  = sanitize(role + "-" + id): lowercased, every char
+#                          outside [a-z0-9] -> '-', runs collapsed, trimmed,
+#                          truncated to 40; empty -> "agent".
+#                  hash6 = first 6 hex chars of HASH (collision-safety anchor:
+#                          two ids whose slugs collide still get distinct
+#                          branches because the id feeds the hash).
+#   worktree   = $SPAWNTERM_WORKTREE_ROOT/<leaf>   (default root:
+#                  <parent-of-repo>/.spawnterm-worktrees/<repo-basename>)
+#                  leaf = <slug>-<hash6>. Kept OUTSIDE the repo tree so it never
+#                  shows up as untracked in the main checkout.
+#   port       = base + (int(first 7 hex of HASH) % span)
+#                  default base 41000, span 1000  => range 41000..41999.
+#                  Deterministic *candidate*; the side-effecting layer may probe
+#                  upward from here for a free TCP port (see `create`).
+#   namespace  = <ns-role>_<hash6>
+#                  ns-role = sanitize(role) into [a-z0-9_], leading letter
+#                  guaranteed (prefixed 'a' if it would start with a digit),
+#                  empty -> "agent". Safe as a DB/schema/service prefix.
+#
+# ---------------------------------------------------------------------------
+# THE SIDE-EFFECT LAYER (subcommands `create` / `cleanup`, both --dry-run-able)
+# ---------------------------------------------------------------------------
+#   create   git worktree add on the derived branch, at the derived path.
+#            Idempotent: re-running for the same agent id reuses the existing
+#            worktree/branch. Handles a pre-existing branch and a dirty repo.
+#            Prints the allocation (branch=/worktree=/port=/namespace=/...) on
+#            stdout so `spawnterm-spawn` can capture the values.
+#   cleanup  Remove an agent's worktree + branch ONLY when it is safe:
+#            refuses a DIRTY working tree and refuses an UNMERGED branch (work
+#            not reachable from --base). --force overrides (destructive).
+#
+# --dry-run prints exactly the git commands it WOULD run (as `would-run: ...`
+# lines) plus the resolved allocation, and executes nothing.
+#
+# Gating: `create`/`cleanup` self-gate on `spawnterm.worktree_isolation` via
+# `spawnterm-flag` (fail-safe: flag absent / helper missing => OFF => no-op,
+# exit 0), bypassable with --no-gate or SPAWNTERM_FORCE=1, matching the
+# spawnterm-emit / spawnterm-spawn convention. `plan`/`env` are pure and never
+# gate.
+#
+# No external deps beyond `git`, a sha helper (shasum/sha1sum/openssl), and the
+# optional `spawnterm-flag`.
+set -eu
+
+PROG="spawnterm-worktree"
+FLAG_KEY="spawnterm.worktree_isolation"
+
+DEFAULT_BASE_PORT=41000
+DEFAULT_SPAN=1000
+SLUG_MAX=40
+
+die() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	exit 2
+}
+
+warn() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+}
+
+# --- locate spawnterm-flag (absolute) for the gate ---------------------------
+script_dir() {
+	d="$(dirname "$0")"
+	(cd "$d" 2>/dev/null && pwd)
+}
+
+find_flag() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/../flags/spawnterm-flag" ]; then
+		fd="$(cd "$sd/../flags" && pwd)"
+		printf '%s/spawnterm-flag' "$fd"
+		return 0
+	fi
+	if command -v spawnterm-flag >/dev/null 2>&1; then
+		command -v spawnterm-flag
+		return 0
+	fi
+	return 1
+}
+
+# gate_open: 0 (ON / bypassed) or 1 (OFF). Fail-safe OFF when the flag helper
+# is missing or the flag is not set true.
+gate_open() {
+	[ "${SPAWNTERM_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	flag="$(find_flag 2>/dev/null)" || return 1
+	if "$flag" "$FLAG_KEY" >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+# --- pure helpers ------------------------------------------------------------
+
+# canonicalize a directory path (realpath without requiring realpath(1)).
+canon_dir() {
+	(cd "$1" 2>/dev/null && pwd -P)
+}
+
+# Canonicalize a possibly-nonexistent path: resolve symlinks on its longest
+# existing prefix, then re-attach the missing suffix. Keeps our worktree paths
+# byte-identical to what `git worktree` stores (e.g. /var -> /private/var on
+# macOS), so registration/removal comparisons match.
+canon_existing() {
+	p="$1"; suffix=""
+	while [ ! -e "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ] && [ -n "$p" ]; do
+		suffix="/$(basename "$p")$suffix"
+		p="$(dirname "$p")"
+	done
+	if [ -d "$p" ]; then
+		printf '%s%s' "$(cd "$p" && pwd -P)" "$suffix"
+	else
+		printf '%s%s' "$p" "$suffix"
+	fi
+}
+
+# sha1 hex digest of stdin. Tries shasum, sha1sum, then openssl.
+sha_hex() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum | cut -d' ' -f1
+	elif command -v sha1sum >/dev/null 2>&1; then
+		sha1sum | cut -d' ' -f1
+	elif command -v openssl >/dev/null 2>&1; then
+		openssl dgst -sha1 | sed -E 's/^.*= *//'
+	else
+		die "no sha helper found (need shasum, sha1sum, or openssl)"
+	fi
+}
+
+# slugify $1 into a git-ref-safe leaf: lowercase, [a-z0-9] kept, others -> '-',
+# runs collapsed, trimmed, truncated to $SLUG_MAX; empty -> "agent".
+slugify() {
+	s="$(printf '%s' "$1" \
+		| tr '[:upper:]' '[:lower:]' \
+		| tr -c 'a-z0-9' '-' \
+		| sed -E 's/-+/-/g; s/^-//; s/-$//')"
+	s="$(printf '%s' "$s" | cut -c1-"$SLUG_MAX" | sed -E 's/-$//')"
+	[ -n "$s" ] || s="agent"
+	printf '%s' "$s"
+}
+
+# nsify $1 into a DB/service-safe prefix: lowercase, [a-z0-9] kept, others ->
+# '_', runs collapsed, trimmed; leading letter guaranteed; empty -> "agent".
+nsify() {
+	s="$(printf '%s' "$1" \
+		| tr '[:upper:]' '[:lower:]' \
+		| tr -c 'a-z0-9' '_' \
+		| sed -E 's/_+/_/g; s/^_//; s/_$//')"
+	[ -n "$s" ] || s="agent"
+	case "$s" in
+		[a-z]*) ;;
+		*) s="a$s" ;;
+	esac
+	printf '%s' "$s"
+}
+
+is_uint() {
+	case "$1" in
+		'' | *[!0-9]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+# compute_plan: sets BRANCH, WORKTREE, PORT, NAMESPACE, HASH, HASH6, SLUG from
+# the resolved inputs REPO_ROOT, AGENT_ID, ROLE, TASK, BASE_PORT, SPAN. Pure.
+compute_plan() {
+	[ -n "$AGENT_ID" ] || die "an agent id is required (pass --id) to derive isolation"
+	is_uint "$BASE_PORT" || die "--base-port must be a non-negative integer"
+	is_uint "$SPAN" || die "--span must be a positive integer"
+	[ "$SPAN" -ge 1 ] || die "--span must be >= 1"
+
+	# HASH keys on the canonical repo path + agent id so two repos on one machine
+	# don't collide on ports, and re-spawns of the same agent are stable.
+	HASH="$(printf '%s|%s' "$REPO_ROOT" "$AGENT_ID" | sha_hex)"
+	HASH6="$(printf '%s' "$HASH" | cut -c1-6)"
+
+	slug_src="$AGENT_ID"
+	[ -n "$ROLE" ] && slug_src="$ROLE-$AGENT_ID"
+	SLUG="$(slugify "$slug_src")"
+
+	BRANCH="spawnterm/${SLUG}-${HASH6}"
+
+	leaf="${SLUG}-${HASH6}"
+	if [ -n "${SPAWNTERM_WORKTREE_ROOT:-}" ]; then
+		wt_root="$SPAWNTERM_WORKTREE_ROOT"
+	else
+		repo_parent="$(dirname "$REPO_ROOT")"
+		repo_base="$(basename "$REPO_ROOT")"
+		wt_root="$repo_parent/.spawnterm-worktrees/$repo_base"
+	fi
+	WORKTREE="$(canon_existing "$wt_root/$leaf")"
+
+	# port int from first 7 hex chars (fits signed 32-bit shell arithmetic).
+	port_hex="$(printf '%s' "$HASH" | cut -c1-7)"
+	port_off=$(( 0x$port_hex % SPAN ))
+	PORT=$(( BASE_PORT + port_off ))
+
+	ns_src="agent"
+	[ -n "$ROLE" ] && ns_src="$ROLE"
+	NAMESPACE="$(nsify "$ns_src")_${HASH6}"
+}
+
+print_plan() {
+	printf 'branch=%s\n' "$BRANCH"
+	printf 'worktree=%s\n' "$WORKTREE"
+	printf 'port=%s\n' "$PORT"
+	printf 'namespace=%s\n' "$NAMESPACE"
+	printf 'hash=%s\n' "$HASH6"
+	printf 'repo=%s\n' "$REPO_ROOT"
+}
+
+# --- repo resolution ---------------------------------------------------------
+resolve_repo() {
+	# $1 = a --repo argument (may be empty => use $PWD). Sets REPO_ROOT to the
+	# git top-level, canonicalized.
+	base="${1:-$PWD}"
+	[ -d "$base" ] || die "not a directory: $base"
+	top="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" \
+		|| die "not inside a git repository: $base"
+	REPO_ROOT="$(canon_dir "$top")"
+}
+
+# --- free-port probing (side-effect layer) -----------------------------------
+# Deterministic candidate first; if taken, walk upward within the range,
+# wrapping, until a free TCP port is found or the range is exhausted.
+port_in_use() {
+	p="$1"
+	# Best-effort, portable-ish. Prefer lsof; fall back to nc; else assume free.
+	if command -v lsof >/dev/null 2>&1; then
+		lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && return 0 || return 1
+	elif command -v nc >/dev/null 2>&1; then
+		nc -z 127.0.0.1 "$p" >/dev/null 2>&1 && return 0 || return 1
+	fi
+	return 1
+}
+
+probe_free_port() {
+	# Starting at $PORT, find a free port within [BASE_PORT, BASE_PORT+SPAN).
+	start="$PORT"
+	i=0
+	cand="$start"
+	while [ "$i" -lt "$SPAN" ]; do
+		if ! port_in_use "$cand"; then
+			PORT="$cand"
+			return 0
+		fi
+		i=$(( i + 1 ))
+		off=$(( (cand - BASE_PORT + 1) % SPAN ))
+		cand=$(( BASE_PORT + off ))
+	done
+	warn "no free port in range ${BASE_PORT}..$(( BASE_PORT + SPAN - 1 )); using deterministic candidate $start"
+	PORT="$start"
+	return 0
+}
+
+# --- git plan runner ---------------------------------------------------------
+# run_git: in dry-run print the command; otherwise execute it (git chatter to
+# stderr so stdout stays machine-parseable).
+run_git() {
+	if [ "$DRYRUN" = "1" ]; then
+		printf 'would-run: git'
+		for a in "$@"; do printf ' %s' "$a"; done
+		printf '\n'
+		return 0
+	fi
+	git "$@" >&2
+}
+
+# --- create ------------------------------------------------------------------
+cmd_create() {
+	compute_plan
+
+	# Probe for a free port only when actually creating (not in dry-run, so the
+	# printed plan stays deterministic and reproducible on any machine).
+	if [ "$DRYRUN" != "1" ] && [ "$NO_PROBE" != "1" ]; then
+		probe_free_port
+	fi
+
+	# Emit the allocation FIRST so callers can capture values regardless of what
+	# the git layer prints afterwards.
+	print_plan
+
+	if [ "$DRYRUN" = "1" ]; then
+		printf 'would-run: mkdir -p %s\n' "$(dirname "$WORKTREE")"
+	else
+		mkdir -p "$(dirname "$WORKTREE")" || die "cannot create worktree parent: $(dirname "$WORKTREE")"
+	fi
+
+	# Idempotent: a worktree already registered at this path -> reuse it.
+	if [ "$DRYRUN" != "1" ] && git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \
+		| grep -qxF "worktree $WORKTREE"; then
+		warn "reusing existing worktree at $WORKTREE"
+		return 0
+	fi
+	if [ -e "$WORKTREE" ] && [ "$DRYRUN" != "1" ]; then
+		# Path exists but is not a registered worktree: refuse to clobber.
+		die "worktree path already exists and is not a git worktree: $WORKTREE"
+	fi
+
+	# Does the branch already exist? If so, add a worktree ON it; else create it.
+	if [ "$DRYRUN" != "1" ] \
+		&& git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+		warn "branch $BRANCH already exists; adding a worktree on it"
+		run_git -C "$REPO_ROOT" worktree add "$WORKTREE" "$BRANCH"
+	else
+		# New branch off current HEAD. A dirty main checkout does NOT block this:
+		# `git worktree add -b` branches from HEAD (committed state), leaving the
+		# spawner's uncommitted changes untouched in the main worktree.
+		run_git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE"
+	fi
+}
+
+# --- cleanup -----------------------------------------------------------------
+detect_base() {
+	# Default merge base for "is this branch merged" checks. Prefer the remote
+	# HEAD, then a local main/master, then the repo's current branch.
+	b="$(git -C "$REPO_ROOT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+	if [ -n "$b" ] && git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$b"; then
+		printf '%s' "$b"; return 0
+	fi
+	for cand in main master; do
+		if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$cand"; then
+			printf '%s' "$cand"; return 0
+		fi
+	done
+	git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null
+}
+
+cmd_cleanup() {
+	compute_plan
+	print_plan
+
+	base="$BASE_REF"
+	[ -n "$base" ] || base="$(detect_base)"
+	[ -n "$base" ] || die "cannot determine a base branch for the merged check (pass --base)"
+	printf 'base=%s\n' "$base"
+
+	if [ "$DRYRUN" = "1" ]; then
+		printf 'would-run: git -C %s status --porcelain   (in worktree %s)\n' "$WORKTREE" "$WORKTREE"
+		printf 'would-run: git -C %s branch --merged %s   (checking %s)\n' "$REPO_ROOT" "$base" "$BRANCH"
+		printf 'would-run: git -C %s worktree remove %s\n' "$REPO_ROOT" "$WORKTREE"
+		printf 'would-run: git -C %s branch -d %s\n' "$REPO_ROOT" "$BRANCH"
+		printf 'would-run: git -C %s worktree prune\n' "$REPO_ROOT"
+		return 0
+	fi
+
+	# The worktree may already be gone; the branch may still linger.
+	wt_registered=0
+	if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \
+		| grep -qxF "worktree $WORKTREE"; then
+		wt_registered=1
+	fi
+	branch_exists=0
+	if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+		branch_exists=1
+	fi
+
+	if [ "$wt_registered" = "0" ] && [ "$branch_exists" = "0" ]; then
+		warn "nothing to clean: no worktree at $WORKTREE and no branch $BRANCH"
+		git -C "$REPO_ROOT" worktree prune >&2 2>/dev/null || true
+		return 0
+	fi
+
+	# SAFETY 1: refuse a dirty working tree (uncommitted or untracked changes).
+	if [ "$wt_registered" = "1" ] && [ -d "$WORKTREE" ]; then
+		dirty="$(git -C "$WORKTREE" status --porcelain 2>/dev/null)"
+		if [ -n "$dirty" ]; then
+			if [ "$FORCE" = "1" ]; then
+				warn "worktree $WORKTREE is DIRTY; removing anyway (--force)"
+			else
+				warn "refusing to remove: worktree $WORKTREE has uncommitted/untracked changes"
+				warn "commit or stash them, or pass --force to discard. Nothing was removed."
+				return 1
+			fi
+		fi
+	fi
+
+	# SAFETY 2: refuse an unmerged branch (commits not reachable from base).
+	if [ "$branch_exists" = "1" ]; then
+		merged=0
+		if git -C "$REPO_ROOT" branch --merged "$base" --format '%(refname:short)' 2>/dev/null \
+			| grep -qxF "$BRANCH"; then
+			merged=1
+		fi
+		if [ "$merged" = "0" ]; then
+			if [ "$FORCE" = "1" ]; then
+				warn "branch $BRANCH is NOT merged into $base; removing anyway (--force)"
+			else
+				ahead="$(git -C "$REPO_ROOT" rev-list --count "$base..$BRANCH" 2>/dev/null || echo '?')"
+				warn "refusing to remove: branch $BRANCH has $ahead commit(s) not merged into $base"
+				warn "merge it first, or pass --force to destroy the work. Nothing was removed."
+				return 1
+			fi
+		fi
+	fi
+
+	# Safe (or forced): remove the worktree, then delete the branch, then prune.
+	if [ "$wt_registered" = "1" ]; then
+		if [ "$FORCE" = "1" ]; then
+			git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" >&2
+		else
+			git -C "$REPO_ROOT" worktree remove "$WORKTREE" >&2
+		fi
+	fi
+	if [ "$branch_exists" = "1" ]; then
+		if [ "$FORCE" = "1" ]; then
+			git -C "$REPO_ROOT" branch -D "$BRANCH" >&2
+		else
+			git -C "$REPO_ROOT" branch -d "$BRANCH" >&2
+		fi
+	fi
+	git -C "$REPO_ROOT" worktree prune >&2 2>/dev/null || true
+	warn "removed worktree $WORKTREE and branch $BRANCH"
+}
+
+# --- env ---------------------------------------------------------------------
+# Print eval-able export lines for the spawned session. Pure (no git, no gate).
+cmd_env() {
+	compute_plan
+	printf 'export SPAWNTERM_PORT=%s\n' "$PORT"
+	printf 'export SPAWNTERM_NS=%s\n' "$NAMESPACE"
+	printf 'export SPAWNTERM_WORKTREE=%s\n' "$WORKTREE"
+	printf 'export SPAWNTERM_BRANCH=%s\n' "$BRANCH"
+}
+
+usage() {
+	cat <<EOF
+$PROG — per-agent git-worktree + \$SPAWNTERM_PORT / \$SPAWNTERM_NS isolation.
+
+Usage:
+  $PROG <command> [options]
+
+Commands:
+  plan       Print the derived allocation (pure, no side effects, no gate):
+             branch, worktree path, port, namespace, hash, repo.
+  env        Print eval-able export lines (SPAWNTERM_PORT / _NS / _WORKTREE /
+             _BRANCH). Pure, no side effects, no gate.
+  create     Create the git worktree on the derived branch (gated). Prints the
+             allocation on stdout. Idempotent; --dry-run prints the git plan.
+  cleanup    Remove an agent's worktree + branch IF SAFE (gated): refuses a
+             dirty working tree and an unmerged branch. --force overrides.
+  -h,--help  Show this help.
+
+Common options:
+  --repo <dir>       Repo to operate on (default: \$PWD). Resolved to its git
+                     top-level.
+  --id <id>          Agent id (REQUIRED). Anchors the deterministic hash.
+  --role <role>      Agent role (feeds the human-readable slug + namespace).
+  --task <task>      Agent task (informational; not part of the hash).
+  --base-port <n>    Base of the port range (default: $DEFAULT_BASE_PORT).
+  --span <n>         Size of the port range (default: $DEFAULT_SPAN).
+                     Deterministic port = base + (hash % span).
+
+create options:
+  --dry-run          Print the git commands + allocation; execute nothing.
+  --no-probe         Skip free-port probing; use the deterministic port as-is.
+  --no-gate          Bypass the feature-flag gate (local testing).
+
+cleanup options:
+  --base <ref>       Branch to test "merged into" against (default: auto-detect
+                     origin/HEAD, then main/master, then current branch).
+  --force            Override the dirty/unmerged safety refusals (DESTRUCTIVE).
+  --dry-run          Print the git commands; execute nothing.
+  --no-gate          Bypass the feature-flag gate (local testing).
+
+Environment:
+  SPAWNTERM_WORKTREE_ROOT   Override the parent dir for all worktrees.
+  SPAWNTERM_FORCE=1         Bypass the feature-flag gate (like --no-gate).
+
+Gating: create/cleanup emit/act only when "$FLAG_KEY" is ON
+(checked via spawnterm-flag). When OFF they no-op and exit 0 (fail-safe).
+plan/env are pure and never gate.
+
+Isolation model, port scheme, and cleanup safety: spawnterm/spawn/WORKTREE.md
+EOF
+}
+
+# --- parse -------------------------------------------------------------------
+[ $# -ge 1 ] || { usage >&2; die "no command given"; }
+
+CMD="$1"; shift
+case "$CMD" in
+	-h|--help|help) usage; exit 0 ;;
+	plan|env|create|cleanup) ;;
+	*) die "unknown command: $CMD (try --help)" ;;
+esac
+
+REPO_ARG=""
+AGENT_ID=""
+ROLE=""
+TASK=""
+BASE_PORT="$DEFAULT_BASE_PORT"
+SPAN="$DEFAULT_SPAN"
+DRYRUN=0
+NO_GATE=0
+NO_PROBE=0
+FORCE=0
+BASE_REF=""
+
+[ "${SPAWNTERM_FORCE:-}" = "1" ] && NO_GATE=1
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--repo) [ $# -ge 2 ] || die "--repo requires a <dir>"; REPO_ARG="$2"; shift 2 ;;
+		--repo=*) REPO_ARG="${1#--repo=}"; shift ;;
+		--id) [ $# -ge 2 ] || die "--id requires an <id>"; AGENT_ID="$2"; shift 2 ;;
+		--id=*) AGENT_ID="${1#--id=}"; shift ;;
+		--role) [ $# -ge 2 ] || die "--role requires a <role>"; ROLE="$2"; shift 2 ;;
+		--role=*) ROLE="${1#--role=}"; shift ;;
+		--task) [ $# -ge 2 ] || die "--task requires a <task>"; TASK="$2"; shift 2 ;;
+		--task=*) TASK="${1#--task=}"; shift ;;
+		--base-port) [ $# -ge 2 ] || die "--base-port requires a value"; BASE_PORT="$2"; shift 2 ;;
+		--base-port=*) BASE_PORT="${1#--base-port=}"; shift ;;
+		--span) [ $# -ge 2 ] || die "--span requires a value"; SPAN="$2"; shift 2 ;;
+		--span=*) SPAN="${1#--span=}"; shift ;;
+		--base) [ $# -ge 2 ] || die "--base requires a <ref>"; BASE_REF="$2"; shift 2 ;;
+		--base=*) BASE_REF="${1#--base=}"; shift ;;
+		--dry-run) DRYRUN=1; shift ;;
+		--no-gate) NO_GATE=1; shift ;;
+		--no-probe) NO_PROBE=1; shift ;;
+		--force) FORCE=1; shift ;;
+		-h|--help) usage; exit 0 ;;
+		--) shift; break ;;
+		-*) die "unknown option: $1 (try --help)" ;;
+		*) die "unexpected argument: $1 (try --help)" ;;
+	esac
+done
+
+resolve_repo "$REPO_ARG"
+
+case "$CMD" in
+	plan)
+		compute_plan
+		print_plan
+		;;
+	env)
+		cmd_env
+		;;
+	create)
+		if ! gate_open; then
+			warn "gate closed ($FLAG_KEY is OFF); no worktree created"
+			exit 0
+		fi
+		cmd_create
+		;;
+	cleanup)
+		if ! gate_open; then
+			warn "gate closed ($FLAG_KEY is OFF); no cleanup performed"
+			exit 0
+		fi
+		cmd_cleanup
+		;;
+esac

@@ -118,6 +118,27 @@ assert_exit "--home + --dir conflict exits 2" 2 sh "$SPAWN" --home --dir /tmp --
 assert_exit "dry-run happy path exits 0"     0 sh "$SPAWN" --role x --dry-run -- true
 
 echo
+echo "--- 6b. worktree isolation gate (#13) ---"
+# Gate OFF (default config): spawn behaves EXACTLY as #10 — plain \$PWD, no
+# worktree, no port exports. Run from a plain (git) dir; the flag is off.
+iso_off="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --dry-run -- true)"
+assert_contains "isolation OFF by default (= #10)" "isolation    : off" "$iso_off"
+case "$iso_off" in
+	*SPAWNTERM_PORT*) red "gate OFF leaked a SPAWNTERM_PORT export (should be #10)" ;;
+	*)                green "gate OFF injects no SPAWNTERM_PORT (plain cwd inheritance)" ;;
+esac
+# Gate bypassed with --no-gate: isolation turns ON -> worktree cwd + port/ns
+# exports appear. Requires a git repo, so run from the spawn dir (in this repo).
+iso_on="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --task iso --no-gate --dry-run -- claude)"
+assert_contains "isolation ON via --no-gate"          "isolation    : ON"                 "$iso_on"
+assert_contains "ON: new tab cds into the worktree"   "worktree=" "$iso_on"
+assert_contains "ON: exports SPAWNTERM_PORT"          "export SPAWNTERM_PORT="            "$iso_on"
+assert_contains "ON: exports SPAWNTERM_NS"            "export SPAWNTERM_NS="              "$iso_on"
+assert_contains "ON: branch under spawnterm/"         "branch=spawnterm/worker-13-"       "$iso_on"
+# The user command still survives after the injected exports.
+assert_contains "ON: user command preserved after exports" "'claude'" "$iso_on"
+
+echo
 echo "--- 6. generated AppleScript parses ---"
 if command -v osacompile >/dev/null 2>&1; then
 	AS_FILE="$(mktemp).applescript"
