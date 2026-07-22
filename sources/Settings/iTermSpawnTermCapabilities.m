@@ -33,7 +33,8 @@ static NSString *const iTermSpawnTermFlagEnvironmentVariable = @"SPAWNTERM_FLAG"
                          @"broker",
                          @"review",
                          @"tmux",
-                         @"claude_statusbar" ];
+                         @"claude_statusbar",
+                         @"agent_menubar" ];
     });
     return identifiers;
 }
@@ -65,7 +66,8 @@ static NSString *const iTermSpawnTermFlagEnvironmentVariable = @"SPAWNTERM_FLAG"
                    @"broker": @"Broker",
                    @"review": @"Review",
                    @"tmux": @"tmux",
-                   @"claude_statusbar": @"Claude Code Status Bar" };
+                   @"claude_statusbar": @"Claude Code Status Bar",
+                   @"agent_menubar": @"AI Agent Menu Bar" };
     });
     NSString *name = names[capability];
     if (name) {

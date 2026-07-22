@@ -43,6 +43,15 @@ Major New Features:
   General > AI > spawnTerm. Adapted from
   gnachman/iTerm2#648.
 
+- A new spawnTerm capability, "AI Agent Menu
+  Bar", adds an opt-in menu bar status item
+  with a live count badge of how many AI
+  agents are currently working (terminal
+  Claude Code sessions and built-in AI chats).
+  Off by default; enable it in Settings >
+  General > AI > spawnTerm. Adapted from
+  gnachman/iTerm2#670.
+
 - The Companion app can now receive push
   notifications for terminal alerts. Turn on
   "Send alerts to paired iPhone" in a profile's
