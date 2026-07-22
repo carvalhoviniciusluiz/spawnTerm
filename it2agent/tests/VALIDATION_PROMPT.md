@@ -133,10 +133,53 @@ IT2AGENT_FORCE=1 it2agent-inbox list 2>&1 | head -3
   (Claude status-bar, menu-bar de agentes, Codex tab status).
 - Ligar `claude_statusbar`/`menubar`/`codex_status` e ver o componente aparecer.
 
+## 11. E2E cross-tab — spawnar um agente numa ABA NOVA e conversar com ele (o cenário real)
+Este é o teste do diferenciador: uma **segunda aba de verdade** roda um agente que registra no
+broker e fica em poll; desta aba (agente A) você manda uma mensagem e verifica entrega + ack + resposta
+**entre abas**. Precisa do iTerm2 rodando (você está nele).
+```sh
+it2agent-flag enable agent.broker agent.status_board
+export IT2AGENT_BROKER_DB="$(mktemp -d)/e2e.db"
+export IT2AGENT_BROKER_SOCK="$(mktemp -d)/e2e.sock"
+RESULT="$(mktemp -d)/received.log"
+python3 "$ST/broker/it2agent_broker.py" serve --no-gate &   # broker durável
+sleep 1
+# Abre uma ABA NOVA de verdade rodando o agente B (o socket vai explícito: a aba
+# nova é um login shell que NÃO herda o env exportado desta aba):
+( cd "$REPO" && IT2AGENT_FORCE=1 it2agent-spawn --role backend --id tabB -- \
+    python3 "$ST/tests/e2e_agent_shim.py" --sock "$IT2AGENT_BROKER_SOCK" --result "$RESULT" --me b --peer a --timeout 30 )
+sleep 3   # deixa a aba abrir e registrar
+# Agente A (esta aba) manda mensagem cross-tab para B:
+python3 - <<PY
+import socket,os,json
+sock=os.environ["IT2AGENT_BROKER_SOCK"]
+def rpc(o):
+    s=socket.socket(socket.AF_UNIX); s.connect(sock)
+    s.sendall((json.dumps(o)+"\n").encode()); r=s.makefile().readline(); s.close(); return json.loads(r)
+print("A send:", rpc({"op":"send","to":"b","from":"a","body":"ping cross-tab"}))
+PY
+sleep 3
+echo "--- o que a ABA B recebeu (arquivo escrito pelo processo da outra aba): ---"; cat "$RESULT"
+echo "--- A recebe a resposta de B (poll): ---"
+python3 - <<PY
+import socket,os,json
+sock=os.environ["IT2AGENT_BROKER_SOCK"]
+def rpc(o):
+    s=socket.socket(socket.AF_UNIX); s.connect(sock)
+    s.sendall((json.dumps(o)+"\n").encode()); r=s.makefile().readline(); s.close(); return json.loads(r)
+r=rpc({"op":"poll","agent":"a"}); print("A poll:", r)
+if r.get("messages"): rpc({"op":"ack","agent":"a","msg_id":max(m["id"] for m in r["messages"])})
+PY
+```
+✅ se: a **aba B abre** com identidade (role/status na aba); `$RESULT` mostra `recv ... body='ping cross-tab'`
+seguido de `acked ... done`; e o `poll` de A traz `body: 'pong: ping cross-tab'` vindo de `from: 'b'`.
+Isso prova mensageria durável **agente↔agente entre abas** com ack (o que o suporte nativo não tem).
+Confirme também **visualmente** que a nova aba apareceu e reagiu.
+
 ## Relatório final
-Devolva uma tabela ✅/❌ por seção (1–10), citando a evidência real (bytes/JSON/saída). No fim,
+Devolva uma tabela ✅/❌ por seção (1–11), citando a evidência real (bytes/JSON/saída). No fim,
 liste o que passou no CLI agora vs. o que ficou pendente de build (GUI). Restaure meus flags
-(o `IT2AGENT_CONFIG` era temporário, então nada foi tocado no meu config real) e mate o broker
-que subiu (`kill %1` ou pelo PID).
+(o `IT2AGENT_CONFIG` era temporário, então nada foi tocado no meu config real), **mate os brokers
+que subiu** (`jobs`/`kill %1 %2 ...` ou pelo PID) e feche a aba B que o teste 11 abriu.
 
 --- FIM ---
