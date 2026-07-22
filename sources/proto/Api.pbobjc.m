@@ -158,6 +158,7 @@ GPBObjCClassDeclaration(ITMServerOriginatedRPCNotification);
 GPBObjCClassDeclaration(ITMServerOriginatedRPCResultRequest);
 GPBObjCClassDeclaration(ITMServerOriginatedRPCResultResponse);
 GPBObjCClassDeclaration(ITMServerOriginatedRPC_RPCArgument);
+GPBObjCClassDeclaration(ITMSessionFilter);
 GPBObjCClassDeclaration(ITMSessionSummary);
 GPBObjCClassDeclaration(ITMSetBroadcastDomainsRequest);
 GPBObjCClassDeclaration(ITMSetBroadcastDomainsResponse);
@@ -12591,9 +12592,11 @@ typedef struct ITMCodePointsPerCell__storage_ {
 
 @implementation ITMListSessionsRequest
 
+@dynamic hasFilter, filter;
 
 typedef struct ITMListSessionsRequest__storage_ {
   uint32_t _has_storage_[1];
+  ITMSessionFilter *filter;
 } ITMListSessionsRequest__storage_;
 
 // This method is threadsafe because it is initially called
@@ -12601,13 +12604,91 @@ typedef struct ITMListSessionsRequest__storage_ {
 + (GPBDescriptor *)descriptor {
   static GPBDescriptor *descriptor = nil;
   if (!descriptor) {
+    static GPBMessageFieldDescription fields[] = {
+      {
+        .name = "filter",
+        .dataTypeSpecific.clazz = GPBObjCClass(ITMSessionFilter),
+        .number = ITMListSessionsRequest_FieldNumber_Filter,
+        .hasIndex = 0,
+        .offset = (uint32_t)offsetof(ITMListSessionsRequest__storage_, filter),
+        .flags = GPBFieldOptional,
+        .dataType = GPBDataTypeMessage,
+      },
+    };
     GPBDescriptor *localDescriptor =
         [GPBDescriptor allocDescriptorForClass:[ITMListSessionsRequest class]
                                      rootClass:[ITMApiRoot class]
                                           file:ITMApiRoot_FileDescriptor()
-                                        fields:NULL
-                                    fieldCount:0
+                                        fields:fields
+                                    fieldCount:(uint32_t)(sizeof(fields) / sizeof(GPBMessageFieldDescription))
                                    storageSize:sizeof(ITMListSessionsRequest__storage_)
+                                         flags:(GPBDescriptorInitializationFlags)(GPBDescriptorInitializationFlag_UsesClassRefs | GPBDescriptorInitializationFlag_Proto3OptionalKnown)];
+    #if defined(DEBUG) && DEBUG
+      NSAssert(descriptor == nil, @"Startup recursed!");
+    #endif  // DEBUG
+    descriptor = localDescriptor;
+  }
+  return descriptor;
+}
+
+@end
+
+#pragma mark - ITMSessionFilter
+
+@implementation ITMSessionFilter
+
+@dynamic hasLabelKey, labelKey;
+@dynamic hasLabelValue, labelValue;
+@dynamic hasTitleSubstring, titleSubstring;
+
+typedef struct ITMSessionFilter__storage_ {
+  uint32_t _has_storage_[1];
+  NSString *labelKey;
+  NSString *labelValue;
+  NSString *titleSubstring;
+} ITMSessionFilter__storage_;
+
+// This method is threadsafe because it is initially called
+// in +initialize for each subclass.
++ (GPBDescriptor *)descriptor {
+  static GPBDescriptor *descriptor = nil;
+  if (!descriptor) {
+    static GPBMessageFieldDescription fields[] = {
+      {
+        .name = "labelKey",
+        .dataTypeSpecific.clazz = Nil,
+        .number = ITMSessionFilter_FieldNumber_LabelKey,
+        .hasIndex = 0,
+        .offset = (uint32_t)offsetof(ITMSessionFilter__storage_, labelKey),
+        .flags = GPBFieldOptional,
+        .dataType = GPBDataTypeString,
+      },
+      {
+        .name = "labelValue",
+        .dataTypeSpecific.clazz = Nil,
+        .number = ITMSessionFilter_FieldNumber_LabelValue,
+        .hasIndex = 1,
+        .offset = (uint32_t)offsetof(ITMSessionFilter__storage_, labelValue),
+        .flags = GPBFieldOptional,
+        .dataType = GPBDataTypeString,
+      },
+      {
+        .name = "titleSubstring",
+        .dataTypeSpecific.clazz = Nil,
+        .number = ITMSessionFilter_FieldNumber_TitleSubstring,
+        .hasIndex = 2,
+        .offset = (uint32_t)offsetof(ITMSessionFilter__storage_, titleSubstring),
+        .flags = GPBFieldOptional,
+        .dataType = GPBDataTypeString,
+      },
+    };
+    GPBDescriptor *localDescriptor =
+        [GPBDescriptor allocDescriptorForClass:[ITMSessionFilter class]
+                                     rootClass:[ITMApiRoot class]
+                                          file:ITMApiRoot_FileDescriptor()
+                                        fields:fields
+                                    fieldCount:(uint32_t)(sizeof(fields) / sizeof(GPBMessageFieldDescription))
+                                   storageSize:sizeof(ITMSessionFilter__storage_)
                                          flags:(GPBDescriptorInitializationFlags)(GPBDescriptorInitializationFlag_UsesClassRefs | GPBDescriptorInitializationFlag_Proto3OptionalKnown)];
     #if defined(DEBUG) && DEBUG
       NSAssert(descriptor == nil, @"Startup recursed!");
@@ -12961,6 +13042,7 @@ typedef struct ITMFrame__storage_ {
 @dynamic hasFrame, frame;
 @dynamic hasGridSize, gridSize;
 @dynamic hasTitle, title;
+@dynamic tagsArray, tagsArray_Count;
 
 typedef struct ITMSessionSummary__storage_ {
   uint32_t _has_storage_[1];
@@ -12968,6 +13050,7 @@ typedef struct ITMSessionSummary__storage_ {
   ITMFrame *frame;
   ITMSize *gridSize;
   NSString *title;
+  NSMutableArray *tagsArray;
 } ITMSessionSummary__storage_;
 
 // This method is threadsafe because it is initially called
@@ -13010,6 +13093,15 @@ typedef struct ITMSessionSummary__storage_ {
         .hasIndex = 3,
         .offset = (uint32_t)offsetof(ITMSessionSummary__storage_, title),
         .flags = GPBFieldOptional,
+        .dataType = GPBDataTypeString,
+      },
+      {
+        .name = "tagsArray",
+        .dataTypeSpecific.clazz = Nil,
+        .number = ITMSessionSummary_FieldNumber_TagsArray,
+        .hasIndex = GPBNoHasBit,
+        .offset = (uint32_t)offsetof(ITMSessionSummary__storage_, tagsArray),
+        .flags = GPBFieldRepeated,
         .dataType = GPBDataTypeString,
       },
     };

@@ -1531,6 +1531,28 @@ message CodePointsPerCell {
 }
 
 message ListSessionsRequest {
+  // spawnTerm extension (fork-only): optional server-side filter. When absent,
+  // every session is returned (unchanged default behavior). When present, only
+  // sessions matching the filter appear in the response; windows/tabs left with
+  // no matching sessions are omitted.
+  optional SessionFilter filter = 1;
+}
+
+// spawnTerm extension (fork-only): a descriptive filter over the session
+// registry surfaced by ListSessions. All set constraints are ANDed; an empty
+// filter (no fields set) matches every session. See SessionSummary.tags for how
+// labels are derived from a session's user-vars.
+message SessionFilter {
+  // Require a matching label. With label_value set, requires the exact tag
+  // "<label_key>=<label_value>"; with only label_key set, requires any tag
+  // whose key is label_key; with only label_value set, requires any tag whose
+  // value is label_value.
+  optional string label_key = 1;
+  optional string label_value = 2;
+
+  // Case-insensitive substring match against SessionSummary.title. Absent =
+  // no title constraint.
+  optional string title_substring = 3;
 }
 
 message SendTextRequest {
@@ -1589,6 +1611,15 @@ message SessionSummary {
     optional Frame frame = 2;  // will not be set for buried sessions
     optional Size grid_size = 3;  // will not be set for buried sessions
     optional string title = 4;
+
+    // spawnTerm extension (fork-only): descriptive labels derived from the
+    // session's user-vars. Only the agent-identity subset is exposed: user-vars
+    // whose (dot-free) name begins with "agent_" (e.g. user.agent_status,
+    // user.agent_role, user.agent_task, user.agent_id set by spawnterm-emit).
+    // Each entry is "<name>=<value>", e.g. "agent_status=running". Other
+    // user-vars are intentionally not exposed. Sorted; empty when the session
+    // has no agent_* user-vars.
+    repeated string tags = 5;
 }
 
 message SplitTreeNode {
