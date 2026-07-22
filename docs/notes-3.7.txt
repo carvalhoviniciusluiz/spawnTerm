@@ -34,6 +34,15 @@ Major New Features:
   source of truth. If spawnterm-flag cannot be
   found the checkboxes are shown disabled.
 
+- A new spawnTerm capability, "Claude Code
+  Status Bar", adds an opt-in status-bar
+  component that aggregates Claude Code session
+  status (Waiting/Working/Idle) across all
+  windows, with a popover listing each session.
+  Off by default; enable it in Settings >
+  General > AI > spawnTerm. Adapted from
+  gnachman/iTerm2#648.
+
 - The Companion app can now receive push
   notifications for terminal alerts. Turn on
   "Send alerts to paired iPhone" in a profile's

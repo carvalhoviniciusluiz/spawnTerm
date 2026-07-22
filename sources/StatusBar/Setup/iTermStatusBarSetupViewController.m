@@ -33,6 +33,7 @@
 #import "iTermStatusBarSetupElement.h"
 #import "iTermStatusBarSwiftyStringComponent.h"
 #import "iTermStatusBarVariableBaseComponent.h"
+#import "iTermSpawnTermCapabilities.h"
 #import "NSArray+iTerm.h"
 #import "NSImage+iTerm.h"
 #import "NSJSONSerialization+iTerm.h"
@@ -133,6 +134,13 @@ NS_ASSUME_NONNULL_BEGIN
                                  [iTermStatusBarSwiftyStringComponent class],
                                  [iTermStatusBarFunctionCallComponent class],
                                  ];
+    // spawnTerm: the Claude Code session-status aggregator is imported from
+    // gnachman/iTerm2#648 but gated behind an opt-in feature flag. When the
+    // flag is off (the default) the component is not offered in the setup UI,
+    // so stock behavior is unchanged.
+    if ([iTermSpawnTermCapabilities isEnabledForCapability:@"claude_statusbar"]) {
+        classes = [classes arrayByAddingObject:[iTermStatusBarClaudeCodeComponent class]];
+    }
     classes = [classes filteredArrayUsingBlock:^BOOL(Class c) {
         return ((ProfileType)[c compatibleProfileTypes] & _profileType) != 0;
     }];
