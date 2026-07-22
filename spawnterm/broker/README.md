@@ -84,6 +84,43 @@ trivially testable.
 | `ping` | `{"op":"ping"}` (optional `echo`) | `{"ok":true,"pong":true}` (echoes `echo` when given) |
 | `health` | `{"op":"health"}` | `{"ok":true,"schema_version":N,"db":"…","sock":"…","ops":[…]}` |
 
+### Registry ops (#36)
+
+The **agents** table is a queryable, *persistent* registry keyed by `session_id`
+that survives a broker restart (unlike the daemon's ephemeral registry in #26):
+`role`, `task`, `capabilities` (JSON array), `last_seen`, `alive`.
+
+| Op | Request | Response |
+| --- | --- | --- |
+| `register` | `{"op":"register","session_id":"s1","role":"coder","task":"…","capabilities":["python"],"alive":true}` | `{"ok":true,"agent":{…}}` |
+| `query` | `{"op":"query","role?":"…","alive?":true,"capability?":"…"}` | `{"ok":true,"agents":[…],"count":N}` |
+| `touch` | `{"op":"touch","session_id":"s1","alive?":true}` | `{"ok":true,"agent":{…}}` (or `not_found`) |
+
+`register` is an **upsert** keyed by `session_id` (re-registering replaces the
+row and refreshes `last_seen`). `query` AND-combines its optional filters —
+`role`/`alive` in SQL, `capability` as membership in the decoded JSON list —
+and returns matches most-recently-seen first (no filters → all agents). `touch`
+is the liveness update: it refreshes `last_seen`/`alive`, returning `not_found`
+for an unregistered session.
+
+### Handoff ops (#36)
+
+The **handoffs** table is an **append-only history** per agent/goal: each row
+has `agent_id`, `goal`, `context_ptr`, `owned_files` (JSON array),
+`verification_status`, `created_at`, and a monotonic `id`. Nothing is updated in
+place — a new version is appended each time.
+
+| Op | Request | Response |
+| --- | --- | --- |
+| `handoff_put` | `{"op":"handoff_put","agent_id":"a1","goal":"g","context_ptr":"…","owned_files":["f"],"verification_status":"…"}` | `{"ok":true,"handoff":{…,"id":N}}` |
+| `handoff_get` | `{"op":"handoff_get","agent_id":"a1","goal?":"g"}` | `{"ok":true,"handoff":{…}}` (latest, or `null`) |
+| `handoff_history` | `{"op":"handoff_history","agent_id":"a1","goal?":"g"}` | `{"ok":true,"handoffs":[…],"count":N}` |
+
+`handoff_get` returns the **latest** version (highest `id`) for the agent,
+scoped to `goal` when given; `handoff_history` returns **all** versions oldest →
+newest. Both return an empty result (`null` / `[]`) for an unknown agent.
+Missing/mistyped required fields → `code:"bad_request"`.
+
 Unknown op → `{"ok":false,"error":{"code":"unknown_op",…}}`. A bad-shape request
 (not an object, missing/empty `op`) → `code:"bad_request"`. A malformed line
 (invalid JSON / not an object) → `code:"bad_request"` too. A handler that raises
@@ -152,6 +189,7 @@ the socket server is a thin transport:
 | `schema.py` | **pure** (stdlib `sqlite3`) | `open_db`/`apply_schema`/`init_db`: WAL, busy timeout, idempotent numbered migrations. |
 | `protocol.py` | **pure** (stdlib `json`) | `encode`/`decode`: newline-delimited JSON framing. |
 | `dispatch.py` | **pure** | `register`/`handle`/`ok`/`error` + `BrokerContext`; the `ping`/`health` handlers. |
+| `store.py` | **pure** (stdlib `sqlite3`) | #36 agent registry + append-only handoff history: `upsert_agent`/`query_agents`/`touch_agent` + `put_handoff`/`get_handoff`/`handoff_history`, and their `register`/`query`/`touch`/`handoff_*` ops. |
 | `client.py` | stdlib `socket` | `BrokerClient`: reusable synchronous request/response. |
 | `server.py` | stdlib `asyncio` | `BrokerServer`: bind unix socket → decode line → `dispatch.handle` → encode reply. |
 | `spawnterm_broker.py` | — | entry point: CLI, flag gate, path resolution, `serve`/`ping`/`health`/`paths`. |

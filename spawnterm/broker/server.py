@@ -23,6 +23,7 @@ from typing import Optional
 import dispatch
 import protocol
 import schema
+import store  # noqa: F401 - registers the #36 registry/handoff ops on import
 
 
 class BrokerServer:
