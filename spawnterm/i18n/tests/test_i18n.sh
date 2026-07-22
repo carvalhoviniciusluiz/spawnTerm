@@ -17,6 +17,7 @@ I18N_PY="$HERE/spawnterm_i18n.py"
 LANG_SH="$HERE/spawnterm-lang"
 LANG_PY="$HERE/spawnterm_lang.py"
 FLAG_SH="$HERE/../flags/spawnterm-flag"
+FLAG_PY="$HERE/../flags/spawnterm_flag.py"
 EN_JSON="$HERE/en.json"
 PTBR_JSON="$HERE/pt-BR.json"
 
@@ -126,6 +127,51 @@ SH_FILE="$(cat "$SPAWNTERM_CONFIG")"
 python3 "$LANG_PY" set pt-BR >/dev/null
 PY_FILE="$(cat "$SPAWNTERM_CONFIG")"
 if [ "$SH_FILE" = "$PY_FILE" ]; then ok "shell and python write identical config"; else fail "writer mismatch"; diff <(printf '%s' "$SH_FILE") <(printf '%s' "$PY_FILE"); fi
+
+echo "== cross-tool: NO CLOBBER in either direction (lang <-> flag) =="
+# Direction 1: set language, then enable a flag -> both survive.
+reset
+"$LANG_SH" set pt-BR >/dev/null
+"$FLAG_SH" enable messaging >/dev/null
+assert_eq "dir1 shell: language survives flag enable" "$("$LANG_SH" get)"                "pt-BR"
+assert_eq "dir1 shell: flag on after lang+flag"       "$("$FLAG_SH" spawnterm.messaging)" "1"
+grep -q '^\[settings\]$' "$SPAWNTERM_CONFIG" && ok "dir1 keeps [settings] table" || fail "dir1 lost [settings]"
+grep -q '^\[features\]$' "$SPAWNTERM_CONFIG" && ok "dir1 has [features] table"   || fail "dir1 missing [features]"
+D1_SH="$(cat "$SPAWNTERM_CONFIG")"
+reset
+python3 "$LANG_PY" set pt-BR >/dev/null
+python3 "$FLAG_PY" enable messaging >/dev/null
+assert_eq "dir1 py: language survives flag enable" "$(python3 "$LANG_PY" get)"                "pt-BR"
+assert_eq "dir1 py: flag on after lang+flag"       "$(python3 "$FLAG_PY" spawnterm.messaging)" "1"
+D1_PY="$(cat "$SPAWNTERM_CONFIG")"
+if [ "$D1_SH" = "$D1_PY" ]; then ok "dir1 shell==python byte-identical"; else fail "dir1 writer mismatch"; diff <(printf '%s' "$D1_SH") <(printf '%s' "$D1_PY"); fi
+
+# Direction 2 (vice-versa): enable a flag, then set language -> both survive.
+reset
+"$FLAG_SH" enable broker >/dev/null
+"$LANG_SH" set pt-BR >/dev/null
+assert_eq "dir2 shell: flag survives lang set" "$("$FLAG_SH" spawnterm.broker)" "1"
+assert_eq "dir2 shell: language after flag+lang" "$("$LANG_SH" get)"           "pt-BR"
+D2_SH="$(cat "$SPAWNTERM_CONFIG")"
+reset
+python3 "$FLAG_PY" enable broker >/dev/null
+python3 "$LANG_PY" set pt-BR >/dev/null
+assert_eq "dir2 py: flag survives lang set" "$(python3 "$FLAG_PY" spawnterm.broker)" "1"
+assert_eq "dir2 py: language after flag+lang" "$(python3 "$LANG_PY" get)"           "pt-BR"
+D2_PY="$(cat "$SPAWNTERM_CONFIG")"
+if [ "$D2_SH" = "$D2_PY" ]; then ok "dir2 shell==python byte-identical"; else fail "dir2 writer mismatch"; diff <(printf '%s' "$D2_SH") <(printf '%s' "$D2_PY"); fi
+
+# Repeated cross-tool writes are stable (idempotent serialization).
+reset
+"$FLAG_SH" enable messaging >/dev/null; "$LANG_SH" set pt-BR >/dev/null
+STABLE1="$(cat "$SPAWNTERM_CONFIG")"
+"$FLAG_SH" enable messaging >/dev/null
+STABLE2="$(cat "$SPAWNTERM_CONFIG")"
+assert_eq "repeated cross-tool write is stable" "$STABLE1" "$STABLE2"
+# The flag tool must not fabricate a [settings] table when none exists.
+reset
+"$FLAG_SH" enable messaging >/dev/null
+grep -q '^\[settings\]$' "$SPAWNTERM_CONFIG" && fail "flag fabricated a [settings] table" || ok "flag writes no spurious [settings]"
 
 echo "== shell<->python output parity across every en key =="
 reset

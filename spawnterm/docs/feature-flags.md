@@ -27,11 +27,15 @@ Resolve it at runtime with `spawnterm-flag path`.
 
 ## File format (strict)
 
-Booleans only, under a single `[features]` table, with **quoted, fully-namespaced keys**:
+Booleans only, under a `[features]` table, with **quoted, fully-namespaced keys**.
+The file may also carry a `[settings]` table (owned by `spawnterm-lang`, e.g.
+`language`); the writer preserves it via read-modify-write, mirroring how
+`spawnterm-lang` preserves `[features]`. Canonical table order is `[features]`
+first, then `[settings]`, and a table is emitted only when it has content:
 
 ```toml
-# spawnterm feature flags
-# Managed by spawnterm-flag. All flags default OFF when a key is absent.
+# spawnterm config
+# Managed by spawnterm-flag (features) and spawnterm-lang (settings).
 # Docs: spawnterm/docs/feature-flags.md
 [features]
 "spawnterm.status_board" = false
@@ -53,7 +57,7 @@ Booleans only, under a single `[features]` table, with **quoted, fully-namespace
 The format is deliberately constrained so a pure-shell parser and Python's `tomllib`
 agree exactly:
 
-- One `[features]` table.
+- One `[features]` table (an optional `[settings]` table may follow it).
 - Keys are quoted string keys of the form `"spawnterm.<capability>"`.
 - Values are the bare literals `true` or `false` (no other TOML types).
 

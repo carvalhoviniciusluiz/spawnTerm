@@ -56,6 +56,7 @@ serialize() {
   local language="$1" cap val have_features=0
   printf '# spawnterm config\n'
   printf '# Managed by spawnterm-flag (features) and spawnterm-lang (settings).\n'
+  printf '# Docs: spawnterm/docs/feature-flags.md\n'
   for cap in $KNOWN_FLAGS; do
     val="$(read_feature "$cap")"
     if [ -n "$val" ]; then

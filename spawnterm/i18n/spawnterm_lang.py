@@ -56,6 +56,7 @@ def _serialize(features: dict[str, bool], language: str) -> str:
     lines = [
         "# spawnterm config",
         "# Managed by spawnterm-flag (features) and spawnterm-lang (settings).",
+        "# Docs: spawnterm/docs/feature-flags.md",
     ]
     if features:
         lines.append("[features]")
