@@ -1,10 +1,11 @@
 # AGENTS.md — spawnTerm
 
 > **Read this first.** This repository is **spawnTerm**, a project to orchestrate multiple AI
-> coding agents running in separate **iTerm2** tabs/panes. It happens to be a **fork of
-> `gnachman/iTerm2`**: the iTerm2 source tree is upstream and is touched **only** for **Tier 4**
-> (core PRs back to iTerm2). Everything else — the program's own tooling (Tiers 0–3) — lives under
-> **`spawnterm/`** and does **not** modify iTerm2 source.
+> coding agents running in separate **iTerm2** tabs/panes. It is a **personal fork of
+> `gnachman/iTerm2`** — a parallel version for our own use, **never submitted upstream**. The iTerm2
+> source tree is touched **only** for **Tier 4** (iTerm2 core changes made directly in this fork).
+> Everything else — the program's own tooling (Tiers 0–3) — lives under **`spawnterm/`** and does
+> **not** modify iTerm2 source.
 
 ## Where to start
 1. Open **Epic issue #1** — it is the single source of truth: the concept, the 5-tier plan with
@@ -24,8 +25,9 @@
 ## Scope discipline (critical)
 - **`scope:external-tooling`** issues (Tiers 0–3) → build under `spawnterm/`; **never** edit iTerm2
   source for these. They run *on* iTerm2's API + escape codes.
-- **`scope:iterm2-core`** issues (Tier 4) → these DO change iTerm2 source; open an upstream
-  discussion on `gnachman/iTerm2` first, prototype here, then PR upstream.
+- **`scope:iterm2-core`** issues (Tier 4 / settings pane) → these DO change iTerm2 source, edited
+  **directly in this personal fork** (never submitted upstream — see the "Fork policy" comment on
+  Epic #1). Follow `CLAUDE.md`; build (`tools/build.sh`) + `ModernTests` to verify.
 - **Non-goal:** do not build the durable queue/broker inside iTerm2 (wrong layer — that is Tier 2,
   an external process).
 

@@ -1,6 +1,7 @@
 > **⚠️ This repository is `spawnTerm`** — a project to orchestrate multiple AI coding agents over
-> iTerm2. It is a **fork of iTerm2**; the iTerm2 source and the iTerm2 guide below are relevant
-> **only for Tier 4** (upstream core PRs). **If you are working on the spawnTerm program, start at
+> iTerm2. It is a **personal fork of iTerm2** (never submitted upstream); the iTerm2 source and the
+> iTerm2 guide below are relevant **only for Tier 4** (iTerm2 core changes made directly in this fork).
+> **If you are working on the spawnTerm program, start at
 > [`spawnterm/AGENTS.md`](spawnterm/AGENTS.md) and Epic issue #1** — not the iTerm2 guide below.
 
 ---

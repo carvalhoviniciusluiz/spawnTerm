@@ -1,7 +1,8 @@
-# Upstream proposal — spawnTerm capability toggles in Settings → General → AI (issue #12)
+# Implementation plan — spawnTerm capability toggles in Settings → General → AI (issue #12, fork-direct)
 
-**Status:** DRAFT for operator review. Not posted upstream; no iTerm2 source touched.
-**Scope:** `scope:iterm2-core` (adds UI to iTerm2 Settings).
+**Policy:** per the Fork policy (Epic #1), this is implemented **directly in this personal fork** and
+is **never submitted upstream**. No maintainer discussion, no upstream PR.
+**Scope:** `scope:iterm2-core` (adds UI to iTerm2 Settings, here in the fork). Verify with a build.
 **Depends on:** the feature-flag framework (#11, merged as external tooling).
 
 ## Problem
@@ -58,7 +59,7 @@ TOML parser to iTerm2, and does **not** reimplement flag logic in iTerm2 (respec
   with an external file. Heavier: needs a TOML reader in-tree or still shells out; risks schema drift
   with `KNOWN_FLAGS`.
 
-## Known caveats to raise with the maintainer
+## Known caveats to handle during implementation
 - **Auto layout:** `PreferencePanel.xib` is auto-layout overall, but the AI controls are a
   fixed-frame island (`fixedFrame="YES"`, `translatesAutoresizingMaskIntoConstraints="NO"`). Per
   `CLAUDE.md:19`, new controls should match the surrounding fixed-frame style, not add constraints.
@@ -75,6 +76,7 @@ TOML parser to iTerm2, and does **not** reimplement flag logic in iTerm2 (respec
   existing `// ignored - synthetic value` precedent).
 
 ## Recommended next step
-Open a `gnachman/iTerm2` discussion titled *"Allow a synthetic-getter/setter checkbox group in the
-AI Features pane backed by an external tool"* — framed generally (a pattern for third-party feature
-toggles), with spawnTerm as the motivating example. **Await the operator's go before opening it.**
+Implement directly in the fork: add the synthetic-getter/setter checkbox group to the AI **Features**
+pane bound to `spawnterm-flag`, matching the surrounding fixed-frame layout, build with
+`tools/build.sh`, and verify the toggles round-trip to `config.toml`. One PR, `Closes #12`. Scheduled
+after Tier 4 (#6) since it involves XIB editing.

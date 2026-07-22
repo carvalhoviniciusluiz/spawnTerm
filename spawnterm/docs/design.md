@@ -41,13 +41,15 @@ delivery ack. Custom control sequences are **fire-and-forget** (lost if the daem
 no replay/ack/order). → sqlite + unix-socket broker; the Tier 1 daemon relays; ack by observing the
 target's screen/vars.
 
-## Tier 4 (upstream, only where the API can't reach)
-Candidate iTerm2 core PRs, backed by real usage evidence: optional delivery ack on `async_send_text`;
-native queryable session registry; persisted user-vars. **Not** a broker in iTerm2 (wrong layer).
+## Tier 4 (iTerm2 core, fork-direct — only where the API can't reach)
+iTerm2 core changes made **directly in this personal fork** (never submitted upstream), backed by real
+usage evidence: optional delivery ack on `async_send_text`; native queryable session registry;
+persisted user-vars. **Not** a broker in iTerm2 (wrong layer).
 
 ## Guardrails
 - Tiers 0–3 = `scope:external-tooling`, live in `spawnterm/`, never edit iTerm2 source.
-- Tier 4 = `scope:iterm2-core`, upstream PRs from this fork; discuss with the maintainer first.
+- Tier 4 = `scope:iterm2-core`: changes to iTerm2 source are made directly in this personal fork; never
+  submitted upstream (see the "Fork policy" comment on Epic #1). Built + tested here.
 - The issue comment thread is the durable log; one PR per issue; `Closes #N`.
 
 Sources: iTerm2 docs (escape-codes, python-api, triggers, coprocesses, status-bar, tmux-integration).

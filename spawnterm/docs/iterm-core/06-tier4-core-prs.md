@@ -1,8 +1,9 @@
-# Upstream proposal — Tier 4 iTerm2 core primitives (issue #6)
+# Implementation plan — Tier 4 iTerm2 core primitives (issue #6, fork-direct)
 
-**Status:** DRAFT for operator review. Not posted upstream; no iTerm2 source touched.
-**Scope:** `scope:iterm2-core` (modifies iTerm2 source). Three **independent** items; each becomes
-its own `gnachman/iTerm2` discussion → prototype on the fork → upstream PR.
+**Policy:** per the Fork policy (Epic #1), these changes are made **directly in this personal fork**
+and are **never submitted upstream**. No maintainer discussion, no upstream PR.
+**Scope:** `scope:iterm2-core` (modifies iTerm2 source, here in the fork). Three **independent**
+items → decomposed into issues **#49 (A)**, **#50 (B)**, **#51 (C)**; build + `ModernTests` to verify.
 **Depends on:** Tier 1/2 usage evidence (built + merged as external tooling).
 
 ## Framing (read first)
@@ -110,7 +111,7 @@ sidecar would make per-session identity durable for any script, not just spawnTe
 This does **not** depend on `includeContents`/arrangement capture, so it survives normal session end
 and app restart. Serialization is already solved (the vars flow through `encodableDictionaryValue`).
 
-Open design questions for the maintainer: stable-key choice (`_stableID` vs `_guid`), sidecar
+Open design questions (decide during implementation): stable-key choice (`_stableID` vs `_guid`), sidecar
 location/format, GC of stale sidecars, and interaction with tmux user-vars (`:16512-16515`).
 
 **Invasiveness:** small in code, medium in design decisions. **Not a broker:** durability for the
@@ -124,7 +125,7 @@ existing user-vars value store; no delivery/ordering/consumers.
 2. **Item C** next — unblocks durable identity and also becomes the storage backing for B's labels.
 3. **Item B** last — labels (reusing C) + query filter.
 
-For each: open a `gnachman/iTerm2` discussion (problem → the general-purpose primitive → the
-localized change with the file:line evidence above → explicit "this is not a broker" framing) →
-prototype on `carvalhoviniciusluiz/iTerm2` → upstream PR. **Await the operator's go before opening
-any discussion.**
+For each: implement directly in the fork against the file:line evidence above, keep it a minimal
+general-purpose primitive (not a broker), gate new behavior behind an advanced setting (default OFF),
+add a `ModernTests` test, build clean with `tools/build.sh`, update `docs/notes-3.7.txt`, one PR per
+sub-issue (`Closes #49/#50/#51`). No upstream step.

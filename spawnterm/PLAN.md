@@ -38,7 +38,7 @@ durable log. Each capability **gates on its feature-flag** (`spawnterm.<key>`, d
                    ├─► #14 diff/review surface
                    └─► #16 cost/token dashboard
 
-#3 + #4 (usage evidence) ─────► #6 Tier 4 iTerm2 core PRs (upstream)
+#3 + #4 (usage evidence) ─────► #6 Tier 4 iTerm2 core changes (fork-direct)
 ```
 
 ## Execution order (phases — do in this order)
@@ -49,7 +49,7 @@ durable log. Each capability **gates on its feature-flag** (`spawnterm.<key>`, d
 
 **Phase 1 — Backbone:**
 3. **#3 Tier 1 daemon** — needs Tier 0 done. Unlocks most of the rest.
-4. **#12 settings pane** — needs #11. `scope:iterm2-core` (discuss upstream before the PR).
+4. **#12 settings pane** — needs #11. `scope:iterm2-core` (edited directly in this fork).
 
 **Phase 2 — Capabilities (all need #3; can run in parallel):**
 5. **#4 Tier 2 broker (file-based + ack)** — the differentiator. **#13** worktree+$PORT · **#5** tmux -CC · **#14** review surface · **#16** cost dashboard.
@@ -57,8 +57,8 @@ durable log. Each capability **gates on its feature-flag** (`spawnterm.<key>`, d
 **Phase 3 — Advanced (need their deps):**
 6. **#15 janitor** (needs #13) · **#17 agent inbox** (needs #4) · **#18 MCP surface** (needs #4).
 
-**Phase 4 — Upstream:**
-7. **#6 Tier 4 core PRs** — only after real usage evidence from #3/#4.
+**Phase 4 — iTerm2 core (fork-direct):**
+7. **#6 Tier 4 core changes** — edited directly in this personal fork (never submitted upstream).
 
 ## Operator decision (2026-07-22) — fork is the product
 spawnTerm is a **personal-use AI-agent terminal**, a fork of iTerm2 for the agent-orchestration
@@ -68,8 +68,10 @@ no upstream discussion, no upstream PR. `scope:iterm2-core` now just means "edit
 built + tested here." Core changes are verified by compiling (`tools/build.sh`, `ModernTests` via
 `tools/run_tests.expect`); the full-app run is the operator's test phase. Follow `CLAUDE.md` strictly
 for any iTerm2 source (it_fatalError, external template loader for JS/HTML/CSS, `add_file_to_xcodeproj.rb`,
-`build_proto.sh` after proto edits, warnings-as-errors, update `docs/notes-3.7.txt`). The upstream
-draft proposals under `docs/upstream/` are kept only as a design record.
+`build_proto.sh` after proto edits, warnings-as-errors, update `docs/notes-3.7.txt`). The core
+implementation plans (with file:line grounding) live under `docs/iterm-core/`. **Official policy:**
+changes to iTerm2 source are made directly in this personal fork; never submitted upstream — see the
+"Fork policy" comment on Epic #1.
 
 ## Progress (live)
 **All external-tooling tiers (0–3) + every capability are DONE ✅ and merged. 614 unit tests green on `master` (all pure / iTerm2-free).**
@@ -80,10 +82,10 @@ draft proposals under `docs/upstream/` are kept only as a design record.
 - **Capabilities ✅**: #13 worktree+$PORT · #14 review surface · #15 janitor · #16 cost dashboard · #17 agent inbox · #18 MCP surface.
 
 ## What remains
-Only **`scope:iterm2-core`** (edits iTerm2 source → upstream discussion with the maintainer first; NOT autonomous):
-- **#12** settings pane (AI tab GUI to toggle the flags) — depends on #11 (done).
-- **#6** Tier 4 core PRs (optional delivery-ack, native registry, persisted user-vars) — only after real usage evidence from #3/#4.
-Plus the live tmux-CC API validation (#5's checklist) to run against a real iTerm2.
+Only **`scope:iterm2-core`** — edits iTerm2 source **directly in this fork** (never upstream); built + tested here:
+- **#6** Tier 4 core changes, decomposed: **#51** user-var sidecar (in progress) → **#50** queryable registry + labels · **#49** optional `async_send_text` delivery ack.
+- **#12** settings pane (AI-tab GUI to toggle the flags) — depends on #11 (done); after #6 (involves XIB editing).
+Plus the live tmux-CC API validation (#5's checklist) to run against a real iTerm2 in the test phase.
 
 ## Flags in the schema (all default OFF)
 `spawnterm.status_board · worktree_isolation · messaging · agent_inbox · cost_dashboard · janitor · mcp · daemon · broker · review · tmux`
