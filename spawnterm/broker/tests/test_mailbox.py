@@ -31,7 +31,9 @@ class TestMailboxPure(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_v2_schema_present(self):
-        self.assertEqual(schema.current_version(self.conn), 2)
+        # The mailbox needs at least v2 applied; later migrations (e.g. #36's v3)
+        # may raise the current version further, so assert >= 2, not == 2.
+        self.assertGreaterEqual(schema.current_version(self.conn), 2)
         tables = {
             r[0]
             for r in self.conn.execute(
