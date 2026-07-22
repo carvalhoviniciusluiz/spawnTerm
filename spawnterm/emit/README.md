@@ -5,6 +5,9 @@ their own state by writing iTerm2 proprietary escape codes to their own stdout.
 `scope:external-tooling` — runs *on* iTerm2's escape codes; does not modify
 iTerm2 source.
 
+> To stamp a *newly spawned* tab's identity from birth, see the spawn wrapper in
+> [`spawnterm/spawn`](../spawn/README.md) (#10), which calls these commands.
+
 Two byte-for-byte-identical implementations are provided so agents can use
 whichever is convenient:
 

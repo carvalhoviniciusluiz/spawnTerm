@@ -1,0 +1,284 @@
+#!/usr/bin/env sh
+# spawnterm-spawn — open a new iTerm2 tab running a command and stamp the new
+# agent's identity (role/task/status/color/badge) from birth.
+#
+# spawnTerm Tier 0.4 (#10). scope:external-tooling — this is glue that drives
+# iTerm2 via its AppleScript API + shells out to `spawnterm-emit`; it never
+# modifies iTerm2 source and never re-implements escape codes itself.
+#
+# This is a self-contained *reference* spawn wrapper. It demonstrates the two
+# operator wins from issue #3 and the emit-on-spawn integration so the real
+# `spawn-tl` flow can drop these calls in (see spawnterm/spawn/README.md):
+#
+#   1. cwd inheritance (the quick win, no daemon):
+#        default   -> the new tab inherits the spawner's $PWD
+#        --dir DIR -> open in a specific folder
+#        --home    -> open in the user's home directory
+#
+#   2. identity stamping on spawn: after the tab is created we run, *in the new
+#      session*, the merged spawnterm-emit for each facet, so the tab is
+#      tagged/colored/badged immediately:
+#        spawnterm-emit role   <role>
+#        spawnterm-emit task   <task>
+#        spawnterm-emit status <status>      (busy by default)
+#        spawnterm-emit color  <status>      (lifecycle -> colorblind-safe hex)
+#        spawnterm-emit badge                (default: role · task)
+#      These write the DOT-FREE user vars agent_role / agent_task / agent_status
+#      (iTerm2 forbids '.' in a SetUserVar key), matching spawnterm-emit (#7/#24).
+#
+# Feature-flag gating: we do NOT gate here. Spawning a tab is core and always
+# happens. The identity emits are plain calls to spawnterm-emit, which
+# SELF-GATES on `spawnterm.status_board` (via spawnterm-flag): when the flag is
+# OFF the emit calls produce nothing and exit 0, so the tab simply isn't tagged.
+# This is the simplest correct approach (one gate, in one place). To bypass the
+# gate for local testing, pass --no-gate (forwarded to every emit call) or set
+# SPAWNTERM_FORCE=1 (forwarded as --no-gate into the new session).
+#
+# Opening a tab with a working dir + running a command on stock iTerm2 (no Tier
+# 1 daemon) is done with osascript against iTerm2's scripting model, which
+# exposes `create tab with default profile`, `current session`, and
+# `write text`. The AppleScript is built as a here-doc below.
+#
+# No external deps beyond osascript (macOS built-in) and spawnterm-emit.
+set -eu
+
+PROG="spawnterm-spawn"
+
+# --- locate the merged spawnterm-emit ----------------------------------------
+# Prefer the sibling copy shipped next to this script; fall back to PATH. We
+# resolve to an ABSOLUTE path because the emit call runs in the NEW session,
+# whose PATH/cwd we do not control.
+script_dir() {
+	# POSIX-ish dirname of $0, resolved to an absolute path.
+	d="$(dirname "$0")"
+	(cd "$d" 2>/dev/null && pwd)
+}
+
+find_emit() {
+	sd="$(script_dir)"
+	if [ -n "$sd" ] && [ -x "$sd/../emit/spawnterm-emit" ]; then
+		emit_dir="$(cd "$sd/../emit" && pwd)"
+		printf '%s/spawnterm-emit' "$emit_dir"
+		return 0
+	fi
+	if command -v spawnterm-emit >/dev/null 2>&1; then
+		command -v spawnterm-emit
+		return 0
+	fi
+	return 1
+}
+
+die() {
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	exit 2
+}
+
+usage() {
+	cat <<EOF
+$PROG — open a new iTerm2 tab, cd into a directory, and stamp the new
+agent's identity via spawnterm-emit, then run a command.
+
+Usage:
+  $PROG [options] [--] <command> [args...]
+
+Working directory (issue #3 quick win — no daemon):
+  (default)        Inherit the spawner's \$PWD.
+  --dir <path>     Open the tab in a specific directory.
+  --home           Open the tab in the user's home directory (\$HOME).
+
+Identity (stamped in the new session via spawnterm-emit):
+  --role <role>    agent_role   (also feeds the default badge).
+  --task <task>    agent_task   (also feeds the default badge).
+  --status <s>     agent_status + tab color. One of: busy, blocked, done, idle.
+                   Default: busy. The color is derived from the status.
+
+Other:
+  --no-gate        Forward --no-gate to every emit call (bypass the flag).
+  --dry-run        Print the resolved cwd, the emit calls, the command, and the
+                   AppleScript that WOULD run — execute nothing.
+  -h, --help       Show this help.
+
+Environment:
+  SPAWNTERM_SPAWN_DRYRUN=1   Same as --dry-run.
+  SPAWNTERM_FORCE=1          Forwarded as --no-gate into the emit calls.
+
+Gating: the identity emits self-gate on the feature flag
+"spawnterm.status_board" (via spawnterm-emit -> spawnterm-flag). When the flag
+is OFF the tab still opens; it just isn't tagged/colored/badged. Spawning is
+core and never gated.
+
+Examples:
+  $PROG --role worker --task "build #10" -- claude --dangerously-skip-permissions
+  $PROG --dir ~/proj/api --role reviewer --status idle -- \$SHELL -l
+EOF
+}
+
+# --- parse options ------------------------------------------------------------
+DIR=""          # empty => inherit \$PWD
+USE_HOME=0
+ROLE=""
+TASK=""
+STATUS="busy"
+NO_GATE=0
+DRYRUN="${SPAWNTERM_SPAWN_DRYRUN:-0}"
+[ "$DRYRUN" = "1" ] || DRYRUN=0
+
+# SPAWNTERM_FORCE=1 in the spawner's env means "bypass the gate": forward it.
+if [ "${SPAWNTERM_FORCE:-}" = "1" ]; then
+	NO_GATE=1
+fi
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--dir)
+			[ $# -ge 2 ] || die "--dir requires a <path> argument"
+			DIR="$2"; shift 2 ;;
+		--dir=*)
+			DIR="${1#--dir=}"; shift ;;
+		--home)
+			USE_HOME=1; shift ;;
+		--role)
+			[ $# -ge 2 ] || die "--role requires a <role> argument"
+			ROLE="$2"; shift 2 ;;
+		--role=*)
+			ROLE="${1#--role=}"; shift ;;
+		--task)
+			[ $# -ge 2 ] || die "--task requires a <task> argument"
+			TASK="$2"; shift 2 ;;
+		--task=*)
+			TASK="${1#--task=}"; shift ;;
+		--status)
+			[ $# -ge 2 ] || die "--status requires a <status> argument"
+			STATUS="$2"; shift 2 ;;
+		--status=*)
+			STATUS="${1#--status=}"; shift ;;
+		--no-gate)
+			NO_GATE=1; shift ;;
+		--dry-run)
+			DRYRUN=1; shift ;;
+		-h|--help)
+			usage; exit 0 ;;
+		--)
+			shift; break ;;
+		-*)
+			die "unknown option: $1 (try --help)" ;;
+		*)
+			break ;;
+	esac
+done
+
+# --- validate -----------------------------------------------------------------
+[ $# -ge 1 ] || { usage >&2; die "no command given — a command to run is required"; }
+
+if [ "$USE_HOME" = "1" ] && [ -n "$DIR" ]; then
+	die "--home and --dir are mutually exclusive"
+fi
+
+case "$STATUS" in
+	busy|blocked|done|idle) ;;
+	*) die "unknown status: $STATUS (one of: busy, blocked, done, idle)" ;;
+esac
+
+# --- resolve the working directory -------------------------------------------
+# Precedence: --home > --dir > inherit \$PWD (the default).
+if [ "$USE_HOME" = "1" ]; then
+	CWD="$HOME"
+elif [ -n "$DIR" ]; then
+	CWD="$DIR"
+else
+	CWD="$PWD"
+fi
+
+# Locate emit (absolute path for use in the new session).
+if ! EMIT="$(find_emit)"; then
+	die "cannot find spawnterm-emit (looked next to this script and on PATH)"
+fi
+
+# The command to run in the new tab is the remaining args.
+# Preserve them as a list for both dry-run display and shell quoting.
+
+# --- shell-quote a single argument (single-quote wrapping, POSIX-safe) --------
+shq() {
+	# Wrap in single quotes, escaping any embedded single quote as '\''.
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# --- AppleScript string escape (backslash, then double-quote) -----------------
+as_esc() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# --- build the shell commands to write into the new session ------------------
+# 1) cd into the resolved cwd.
+CD_CMD="cd $(shq "$CWD")"
+
+# 2) identity emits. --no-gate is forwarded when requested so the operator's
+#    force/bypass intent survives into the new session.
+GATE_ARG=""
+[ "$NO_GATE" = "1" ] && GATE_ARG=" --no-gate"
+
+EMIT_CMDS=""
+add_emit() {
+	# $*: the emit subcommand + args, already individually shell-quoted.
+	EMIT_CMDS="${EMIT_CMDS}$(shq "$EMIT")${GATE_ARG} $*
+"
+}
+[ -n "$ROLE" ] && add_emit "role $(shq "$ROLE")"
+[ -n "$TASK" ] && add_emit "task $(shq "$TASK")"
+add_emit "status $(shq "$STATUS")"
+add_emit "color $(shq "$STATUS")"
+add_emit "badge"
+
+# 3) the user command (trailing args), shell-quoted.
+RUN_CMD=""
+for a in "$@"; do
+	if [ -z "$RUN_CMD" ]; then
+		RUN_CMD="$(shq "$a")"
+	else
+		RUN_CMD="$RUN_CMD $(shq "$a")"
+	fi
+done
+
+# The full script written into the new session, one command per line.
+SESSION_SCRIPT="$CD_CMD
+${EMIT_CMDS}${RUN_CMD}"
+
+# --- assemble the AppleScript -------------------------------------------------
+# iTerm2 scripting model: create a tab in the current window (or a new window if
+# none is open), then write each line into `current session`. We escape the
+# script for embedding in an AppleScript double-quoted literal.
+AS_BODY="$(as_esc "$SESSION_SCRIPT")"
+build_applescript() {
+	cat <<APPLESCRIPT
+tell application "iTerm2"
+	if (count of windows) = 0 then
+		set targetWindow to (create window with default profile)
+	else
+		set targetWindow to current window
+		tell targetWindow to create tab with default profile
+	end if
+	tell current session of targetWindow
+		write text "${AS_BODY}"
+	end tell
+end tell
+APPLESCRIPT
+}
+
+APPLESCRIPT_TEXT="$(build_applescript)"
+
+# --- dry-run: print the plan, execute nothing --------------------------------
+if [ "$DRYRUN" = "1" ]; then
+	printf '%s: DRY RUN (nothing executed)\n' "$PROG"
+	printf '  resolved cwd : %s\n' "$CWD"
+	printf '  emit helper  : %s\n' "$EMIT"
+	printf '  gate bypass  : %s\n' "$([ "$NO_GATE" = 1 ] && echo 'yes (--no-gate forwarded)' || echo 'no (emit self-gates on spawnterm.status_board)')"
+	printf '\n  commands written into the new session:\n'
+	printf '%s\n' "$SESSION_SCRIPT" | sed 's/^/    /'
+	printf '\n  AppleScript that WOULD run:\n'
+	printf '%s\n' "$APPLESCRIPT_TEXT" | sed 's/^/    /'
+	exit 0
+fi
+
+# --- execute ------------------------------------------------------------------
+command -v osascript >/dev/null 2>&1 || die "osascript not found (this wrapper requires macOS/iTerm2)"
+printf '%s\n' "$APPLESCRIPT_TEXT" | osascript -
