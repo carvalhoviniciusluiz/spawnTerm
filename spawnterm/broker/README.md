@@ -1,5 +1,173 @@
 # spawnterm/broker
 
-Tier 2 (#4) — sqlite/unix-socket broker (mailbox/registry/state/ack)
+Tier 2.1 (#34, sub-task of #4) — the durable-state **broker**. This is the
+**foundation** of Tier 2; #35 (mailbox + ack), #36 (agent registry + handoff),
+and #37 (daemon↔broker bridge) build on it.
 
-See the tracking issue and root `AGENTS.md`. `scope:external-tooling` — do not modify iTerm2 source here.
+`scope:external-tooling` — the broker runs **entirely outside iTerm2** and never
+imports or modifies iTerm2 source. It exists precisely because iTerm2 has **no
+durable message queue, no queryable registry, no persistent shared state, and no
+delivery ack** (see `spawnterm/docs/design.md` — "What iTerm2 CANNOT do → external
+broker"). Durable state lives **here**, never in iTerm2. The Tier 1 daemon
+bridges the two in #37.
+
+> #34 ships the **core only**: sqlite schema + migration framework, the
+> unix-socket server + client, and the extensible op-dispatch skeleton with
+> `ping`/`health`. The `send`/`poll`/`ack` (#35), `register`/`query`/`handoff`
+> (#36) ops arrive in later sub-issues by registering handlers — no restructuring.
+
+## Feature flag: `spawnterm.broker`
+
+Like every spawnTerm capability, the broker is an individually toggleable,
+per-user feature flag that **defaults OFF** (see
+`spawnterm/docs/feature-flags.md`). The **server refuses to start** when the flag
+is OFF: it prints a message and exits `0` — the same gate pattern as the Tier 1
+daemon.
+
+```sh
+spawnterm-flag enable spawnterm.broker     # turn it on
+spawnterm-flag spawnterm.broker            # query (1/exit0 = on)
+spawnterm-flag disable spawnterm.broker    # turn it off
+```
+
+The gate is checked by importing the #11 helper (`spawnterm_flag.is_enabled`),
+falling back to shelling out to `spawnterm-flag`. Bypass for local testing with
+`--no-gate` or `SPAWNTERM_FORCE=1`. Client subcommands (`ping`/`health`) talk to
+an already-running server and are **not** gated.
+
+## Paths (per-user)
+
+| What | Env override | Default |
+| --- | --- | --- |
+| sqlite db | `$SPAWNTERM_BROKER_DB` | `$XDG_STATE_HOME/spawnterm/broker.db` → `~/.local/state/spawnterm/broker.db` |
+| unix socket | `$SPAWNTERM_BROKER_SOCK` | `$XDG_RUNTIME_DIR/spawnterm/broker.sock` → `~/.local/state/spawnterm/broker.sock` |
+
+Resolve them at runtime with `python3 spawnterm/broker/spawnterm_broker.py paths`.
+`$XDG_RUNTIME_DIR` is the natural home for a socket (ephemeral, per-session) but
+is not always set on macOS, hence the state-dir fallback.
+
+## sqlite: WAL + idempotent migration
+
+The db is opened in **WAL** journal mode with a **busy timeout** (5 s), so
+multiple client processes (CLI clients, the #37 daemon bridge, the server) can
+read/write the same file safely.
+
+Schema creation is **idempotent**. A `schema_version` meta table records which
+numbered migrations have run; `schema.apply_schema()` applies only the pending
+ones and is safe to call on every startup. Future sub-issues add tables by
+appending to `MIGRATIONS` in `schema.py` (v2 for #35 `messages`, v3 for #36
+`agents` + handoff/state history) — a shipped migration is never edited in place.
+
+## Wire protocol: newline-delimited JSON
+
+Framing is **one JSON object per line** (UTF-8, terminated by `\n`) in both
+directions — the simplest frame that is streamable, language-agnostic, and
+trivially testable.
+
+**Request** — only `op` is required:
+
+```json
+{"op": "ping", "echo": "hi"}
+```
+
+**Response** — always an object with a boolean `ok`:
+
+```json
+{"ok": true, "pong": true, "echo": "hi"}
+{"ok": false, "error": {"code": "unknown_op", "message": "unknown op: nope", "op": "nope"}}
+```
+
+### Base ops (#34)
+
+| Op | Request | Response |
+| --- | --- | --- |
+| `ping` | `{"op":"ping"}` (optional `echo`) | `{"ok":true,"pong":true}` (echoes `echo` when given) |
+| `health` | `{"op":"health"}` | `{"ok":true,"schema_version":N,"db":"…","sock":"…","ops":[…]}` |
+
+Unknown op → `{"ok":false,"error":{"code":"unknown_op",…}}`. A bad-shape request
+(not an object, missing/empty `op`) → `code:"bad_request"`. A malformed line
+(invalid JSON / not an object) → `code:"bad_request"` too. A handler that raises
+→ `code:"internal"`. **The server never crashes on bad input.**
+
+### op-dispatch API (extensibility)
+
+Ops are entries in a registry keyed by name. #35/#36/#37 add ops without touching
+the server:
+
+```python
+from dispatch import register, ok, error
+
+@register("send")                       # new op name
+def _send(request, ctx):                # (request dict, BrokerContext)
+    ...                                 # ctx.conn is the live sqlite connection
+    return ok(id=row_id)                # or error("bad_request", "…")
+```
+
+`dispatch.handle(request, ctx)` routes one decoded request to its handler and
+**always** returns a response dict (it converts bad shapes, unknown ops, and
+handler exceptions into structured errors). `health` reports the currently
+registered ops.
+
+## Reusable Python client
+
+```python
+from client import BrokerClient
+
+c = BrokerClient()            # default socket path; or BrokerClient(sock_path=…)
+print(c.ping(echo="hi"))      # {'ok': True, 'pong': True, 'echo': 'hi'}
+print(c.health())             # {'ok': True, 'schema_version': 1, ...}
+print(c.request({"op": "…"})) # arbitrary op → response dict
+```
+
+Each call opens a short-lived connection, writes one request line, reads one
+response line, and closes — stateless and safe to share. Raises `OSError` if the
+server is unreachable.
+
+## Run
+
+```sh
+# Start the server (gated on spawnterm.broker):
+python3 spawnterm/broker/spawnterm_broker.py serve
+python3 spawnterm/broker/spawnterm_broker.py serve --no-gate      # ignore the flag (local)
+python3 spawnterm/broker/spawnterm_broker.py serve --sock /tmp/b.sock --db /tmp/b.db -v
+
+# From another shell, talk to it (not gated):
+python3 spawnterm/broker/spawnterm_broker.py ping
+python3 spawnterm/broker/spawnterm_broker.py health
+python3 spawnterm/broker/spawnterm_broker.py paths
+```
+
+Logs go to **stderr**. Exit codes: `0` (clean / gated-off / successful client
+call), `1` (client could not reach the server, or the server returned
+`ok:false`), `2` (usage error).
+
+## Architecture (testability)
+
+The real logic is **pure** and importable with no socket and no external deps —
+the socket server is a thin transport:
+
+| Module | I/O? | Role |
+| --- | --- | --- |
+| `paths.py` | **pure** | per-user db + socket path resolution (XDG + overrides). |
+| `schema.py` | **pure** (stdlib `sqlite3`) | `open_db`/`apply_schema`/`init_db`: WAL, busy timeout, idempotent numbered migrations. |
+| `protocol.py` | **pure** (stdlib `json`) | `encode`/`decode`: newline-delimited JSON framing. |
+| `dispatch.py` | **pure** | `register`/`handle`/`ok`/`error` + `BrokerContext`; the `ping`/`health` handlers. |
+| `client.py` | stdlib `socket` | `BrokerClient`: reusable synchronous request/response. |
+| `server.py` | stdlib `asyncio` | `BrokerServer`: bind unix socket → decode line → `dispatch.handle` → encode reply. |
+| `spawnterm_broker.py` | — | entry point: CLI, flag gate, path resolution, `serve`/`ping`/`health`/`paths`. |
+
+No module imports `iterm2`. The broker is independent of iTerm2 by design.
+
+## Tests
+
+```sh
+bash spawnterm/broker/tests/run_tests.sh
+```
+
+Pure Python + stdlib only; no pip deps, no iTerm2, no external services. Covers
+path resolution, sqlite schema (WAL is set, busy timeout, idempotent migration
+run twice + across reopen), wire-protocol round-trips + framing rejections,
+op-dispatch (ping/health routing, unknown/bad-shape errors, handler-exception
+isolation, `register` extensibility), the default-OFF `spawnterm.broker` flag
+gate + the no-`iterm2` purity guarantee, and an end-to-end unix-socket round-trip
+(server on a socket in a tmpdir, exercised by the real `BrokerClient`; no sleeps).
