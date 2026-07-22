@@ -48,21 +48,27 @@ class AIMenuBarStatusController: NSObject {
 
     private func subscribeToBrokerIfPossible() {
         guard brokerSubscription == nil else { return }
-        guard let broker = ChatBroker.instance else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.subscribeToBrokerIfPossible()
+        // ChatBroker.instance and .subscribe are @MainActor-isolated. This method
+        // only runs on the main thread (from init and from a main-queue
+        // asyncAfter reschedule below), so assume main-actor isolation to access
+        // them from this nonisolated context.
+        MainActor.assumeIsolated {
+            guard let broker = ChatBroker.instance else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.subscribeToBrokerIfPossible()
+                }
+                return
             }
-            return
-        }
-        brokerSubscription = broker.subscribe(chatID: nil, registrationProvider: nil) { [weak self] update in
-            switch update {
-            case .typingStatus(_, let participant):
-                guard participant == .agent else { return }
-                self?.refresh()
-            case .delivery:
-                break
-            case .turnLifecycle:
-                break
+            brokerSubscription = broker.subscribe(chatID: nil, registrationProvider: nil) { [weak self] update in
+                switch update {
+                case .typingStatus(_, let participant):
+                    guard participant == .agent else { return }
+                    self?.refresh()
+                case .delivery:
+                    break
+                case .turnLifecycle:
+                    break
+                }
             }
         }
     }

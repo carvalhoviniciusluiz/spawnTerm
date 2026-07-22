@@ -1856,7 +1856,14 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     const CGFloat rowHeight = 26;
     const CGFloat checkboxHeight = 18;
     const CGFloat headerHeight = 17;
-    const NSInteger rowsPerColumn = 6;  // 6 + 5 across two columns for 11 flags.
+    // Keep exactly two columns and derive the row count from the number of
+    // capabilities so the grid always fits the fixed 651x291 container. A
+    // hardcoded rowsPerColumn (was 6, for the original 11 flags) overflowed into
+    // a third off-panel column once imports #58/#59/#60 added 3 more flags.
+    NSArray<NSString *> *capabilities = [iTermSpawnTermCapabilities capabilityIdentifiers];
+    const NSInteger columnCount = 2;
+    const NSInteger rowsPerColumn = MAX((NSInteger)1,
+                                        ((NSInteger)capabilities.count + columnCount - 1) / columnCount);
 
     NSTextField *header = [NSTextField labelWithString:@"spawnTerm capabilities"];
     header.frame = NSMakeRect(leftMargin,
@@ -1879,7 +1886,6 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     const CGFloat firstRowTop = containerHeight - headerHeight - 8 - rowHeight * 2;
     NSMutableArray<PreferenceInfo *> *infos = [NSMutableArray array];
     NSMutableArray<NSButton *> *checkboxes = [NSMutableArray array];
-    NSArray<NSString *> *capabilities = [iTermSpawnTermCapabilities capabilityIdentifiers];
     [capabilities enumerateObjectsUsingBlock:^(NSString *capability, NSUInteger idx, BOOL *stop) {
         const NSInteger column = (NSInteger)idx / rowsPerColumn;
         const NSInteger row = (NSInteger)idx % rowsPerColumn;
@@ -1887,6 +1893,11 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         const CGFloat y = firstRowTop - row * rowHeight;
         NSButton *checkbox = [[NSButton alloc] initWithFrame:NSMakeRect(x, y, columnWidth - 10, checkboxHeight)];
         [checkbox setButtonType:NSButtonTypeSwitch];
+        // defineControl: does not wire target/action (XIB controls get it from IB);
+        // programmatically-created controls must connect it themselves, else a
+        // click never reaches -settingChanged: and the flag is not written.
+        checkbox.target = self;
+        checkbox.action = @selector(settingChanged:);
         // Labels come from the i18n catalog in the active language, falling back
         // to the built-in English map when spawnterm-i18n is unavailable.
         checkbox.title = [iTermSpawnTermCapabilities localizedNameForCapability:capability];
@@ -1929,6 +1940,10 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     NSPopUpButton *languagePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(leftMargin + labelWidth, languageRowY - 3, popupWidth, checkboxHeight + 6)
                                                               pullsDown:NO];
     languagePopup.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    // Wire the action so selecting a language reaches -settingChanged: (see the
+    // checkbox note above); without this the popup selection is never persisted.
+    languagePopup.target = self;
+    languagePopup.action = @selector(settingChanged:);
     for (NSString *code in [iTermSpawnTermCapabilities languageCodes]) {
         [languagePopup addItemWithTitle:[iTermSpawnTermCapabilities displayNameForLanguageCode:code]];
         languagePopup.lastItem.representedObject = code;
