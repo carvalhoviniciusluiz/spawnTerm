@@ -23,8 +23,9 @@ import sqlite3
 import time
 from pathlib import Path
 
-# Bump when a new migration is appended below. current == len(MIGRATIONS).
-SCHEMA_VERSION = 2
+# Bump when a new migration is appended below. Equals the highest migration
+# version (#35 owns v2 `messages`; #36 owns v3 `agents` + `handoffs`).
+SCHEMA_VERSION = 3
 
 # Busy timeout for lock contention across processes (WAL still serializes
 # writers). Seconds for the sqlite3.connect timeout; ms for the PRAGMA.
@@ -70,6 +71,37 @@ MIGRATIONS: dict[int, list[str]] = {
         "  cursor INTEGER NOT NULL DEFAULT 0,"
         "  updated_at REAL NOT NULL"
         ")",
+    ],
+    # v3 (#36): persistent agent registry + append-only handoff/state history.
+    # Independent of v2 (#35 `messages`) — creates only its own tables, so it
+    # applies cleanly whether or not v2 is present (migrations are ordered).
+    3: [
+        # Queryable agent registry, keyed by session_id. Survives a broker
+        # restart (unlike the daemon's ephemeral registry in #26).
+        "CREATE TABLE IF NOT EXISTS agents ("
+        "  session_id TEXT NOT NULL PRIMARY KEY,"
+        "  role TEXT,"
+        "  task TEXT,"
+        "  capabilities TEXT,"  # JSON array of capability strings
+        "  last_seen REAL NOT NULL,"
+        "  alive INTEGER NOT NULL DEFAULT 1"  # 0/1
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_agents_role ON agents(role)",
+        "CREATE INDEX IF NOT EXISTS idx_agents_alive ON agents(alive)",
+        # Append-only handoff/state history. Each handoff_put inserts a new row
+        # with a monotonic id; the latest version per (agent_id, goal) is the
+        # highest id, and the full history is every row in id order.
+        "CREATE TABLE IF NOT EXISTS handoffs ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  agent_id TEXT NOT NULL,"
+        "  goal TEXT NOT NULL,"
+        "  context_ptr TEXT,"
+        "  owned_files TEXT,"  # JSON array of file paths
+        "  verification_status TEXT,"
+        "  created_at REAL NOT NULL"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_handoffs_agent_goal "
+        "ON handoffs(agent_id, goal, id)",
     ],
 }
 
