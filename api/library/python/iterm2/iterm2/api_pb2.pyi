@@ -5231,6 +5231,7 @@ class SendTextRequest(_message.Message):
     SESSION_FIELD_NUMBER: _builtins.int
     TEXT_FIELD_NUMBER: _builtins.int
     SUPPRESS_BROADCAST_FIELD_NUMBER: _builtins.int
+    WAIT_FOR_DISPATCH_FIELD_NUMBER: _builtins.int
     session: _builtins.str
     """See documentation on session IDs"""
     text: _builtins.str
@@ -5239,16 +5240,24 @@ class SendTextRequest(_message.Message):
     """
     suppress_broadcast: _builtins.bool
     """If set, input will not be broadcast when broadcasting is on."""
+    wait_for_dispatch: _builtins.bool
+    """spawnTerm extension (fork-only): if set, the response is deferred until the
+    text has been handed off to the session's write pipeline (PTYTask) rather
+    than returned immediately on acceptance. See SendTextResponse.dispatched for
+    the exact guarantee. When absent/false, behavior is unchanged: the response
+    is returned as soon as the request is accepted.
+    """
     def __init__(
         self,
         *,
         session: _builtins.str | None = ...,
         text: _builtins.str | None = ...,
         suppress_broadcast: _builtins.bool | None = ...,
+        wait_for_dispatch: _builtins.bool | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session", "suppress_broadcast", b"suppress_broadcast", "text", b"text"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["session", b"session", "suppress_broadcast", b"suppress_broadcast", "text", b"text", "wait_for_dispatch", b"wait_for_dispatch"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["session", b"session", "suppress_broadcast", b"suppress_broadcast", "text", b"text"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["session", b"session", "suppress_broadcast", b"suppress_broadcast", "text", b"text", "wait_for_dispatch", b"wait_for_dispatch"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
@@ -5272,15 +5281,25 @@ class SendTextResponse(_message.Message):
     SESSION_NOT_FOUND: SendTextResponse.Status.ValueType  # 1
 
     STATUS_FIELD_NUMBER: _builtins.int
+    DISPATCHED_FIELD_NUMBER: _builtins.int
     status: Global___SendTextResponse.Status.ValueType
+    dispatched: _builtins.bool
+    """spawnTerm extension (fork-only): true when wait_for_dispatch was honored and
+    the text was flushed out of the session's own deferral queues into the
+    PTYTask write layer (i.e. handed to the write pipeline). This does NOT
+    guarantee the bytes reached the kernel PTY. For a multi-session "all" send,
+    it is true once every targeted session has been dispatched. It is absent/
+    false when wait_for_dispatch was not requested.
+    """
     def __init__(
         self,
         *,
         status: Global___SendTextResponse.Status.ValueType | None = ...,
+        dispatched: _builtins.bool | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["status", b"status"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["dispatched", b"dispatched", "status", b"status"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["status", b"status"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["dispatched", b"dispatched", "status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

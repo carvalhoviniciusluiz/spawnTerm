@@ -5126,6 +5126,7 @@ typedef GPB_ENUM(ITMSendTextRequest_FieldNumber) {
   ITMSendTextRequest_FieldNumber_Session = 1,
   ITMSendTextRequest_FieldNumber_Text = 2,
   ITMSendTextRequest_FieldNumber_SuppressBroadcast = 3,
+  ITMSendTextRequest_FieldNumber_WaitForDispatch = 4,
 };
 
 GPB_FINAL @interface ITMSendTextRequest : GPBMessage
@@ -5147,12 +5148,23 @@ GPB_FINAL @interface ITMSendTextRequest : GPBMessage
 @property(nonatomic, readwrite) BOOL suppressBroadcast;
 
 @property(nonatomic, readwrite) BOOL hasSuppressBroadcast;
+/**
+ * spawnTerm extension (fork-only): if set, the response is deferred until the
+ * text has been handed off to the session's write pipeline (PTYTask) rather
+ * than returned immediately on acceptance. See SendTextResponse.dispatched for
+ * the exact guarantee. When absent/false, behavior is unchanged: the response
+ * is returned as soon as the request is accepted.
+ **/
+@property(nonatomic, readwrite) BOOL waitForDispatch;
+
+@property(nonatomic, readwrite) BOOL hasWaitForDispatch;
 @end
 
 #pragma mark - ITMSendTextResponse
 
 typedef GPB_ENUM(ITMSendTextResponse_FieldNumber) {
   ITMSendTextResponse_FieldNumber_Status = 1,
+  ITMSendTextResponse_FieldNumber_Dispatched = 2,
 };
 
 GPB_FINAL @interface ITMSendTextResponse : GPBMessage
@@ -5160,6 +5172,17 @@ GPB_FINAL @interface ITMSendTextResponse : GPBMessage
 @property(nonatomic, readwrite) ITMSendTextResponse_Status status;
 
 @property(nonatomic, readwrite) BOOL hasStatus;
+/**
+ * spawnTerm extension (fork-only): true when wait_for_dispatch was honored and
+ * the text was flushed out of the session's own deferral queues into the
+ * PTYTask write layer (i.e. handed to the write pipeline). This does NOT
+ * guarantee the bytes reached the kernel PTY. For a multi-session "all" send,
+ * it is true once every targeted session has been dispatched. It is absent/
+ * false when wait_for_dispatch was not requested.
+ **/
+@property(nonatomic, readwrite) BOOL dispatched;
+
+@property(nonatomic, readwrite) BOOL hasDispatched;
 @end
 
 #pragma mark - ITMSize

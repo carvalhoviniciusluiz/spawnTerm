@@ -48,6 +48,7 @@
 #import "iTermScriptFunctionCall.h"
 #import "iTermScriptHistory.h"
 #import "iTermSelection.h"
+#import "iTermSendTextDispatchAggregator.h"
 #import "iTermSessionLauncher.h"
 #import "iTermStatusBarComponent.h"
 #import "iTermStatusBarViewController.h"
@@ -2417,19 +2418,57 @@ static BOOL iTermAPIHelperLastApplescriptAuthRequiredSetting;
         sessions = @[ session ];
     }
 
+    // Browser sessions have no PTY write pipeline; skip them (as before) and, for
+    // the wait_for_dispatch path, don't count them toward the dispatch ack.
+    NSMutableArray<PTYSession *> *targets = [NSMutableArray array];
     for (PTYSession *session in sessions) {
         if (session.isBrowserSession) {
             continue;
         }
+        [targets addObject:session];
+    }
+
+    // wait_for_dispatch is a spawnTerm fork-only extension. When absent/false the
+    // behavior is exactly as before: write and return OK immediately (OK means
+    // "accepted", not "dispatched").
+    const BOOL waitForDispatch = request.hasWaitForDispatch && request.waitForDispatch;
+    if (!waitForDispatch) {
+        for (PTYSession *session in targets) {
+            if (request.suppressBroadcast) {
+                [session writeTaskNoBroadcast:request.text];
+            } else {
+                [session writeTask:request.text];
+            }
+        }
+        ITMSendTextResponse *response = [[ITMSendTextResponse alloc] init];
+        response.status = ITMSendTextResponse_Status_Ok;
+        handler(response);
+        return;
+    }
+
+    // wait_for_dispatch: defer the OK until every targeted session has handed its
+    // text off to the write pipeline (past PTYSession's own deferral queues, into
+    // PTYTask). This does NOT guarantee the bytes reached the kernel PTY. For an
+    // "all" send the ack aggregates: it fires once, after the last session
+    // dispatches. If there are no writable targets it fires immediately.
+    iTermSendTextDispatchAggregator *aggregator =
+        [[iTermSendTextDispatchAggregator alloc] initWithCount:targets.count
+                                                    completion:^{
+        ITMSendTextResponse *response = [[ITMSendTextResponse alloc] init];
+        response.status = ITMSendTextResponse_Status_Ok;
+        response.dispatched = YES;
+        handler(response);
+    }];
+    for (PTYSession *session in targets) {
+        void (^completion)(void) = ^{
+            [aggregator signal];
+        };
         if (request.suppressBroadcast) {
-            [session writeTaskNoBroadcast:request.text];
+            [session writeTaskNoBroadcast:request.text completion:completion];
         } else {
-            [session writeTask:request.text];
+            [session writeTask:request.text completion:completion];
         }
     }
-    ITMSendTextResponse *response = [[ITMSendTextResponse alloc] init];
-    response.status = ITMSendTextResponse_Status_Ok;
-    handler(response);
 }
 
 - (void)apiServerCreateTab:(ITMCreateTabRequest *)request handler:(void (^)(ITMCreateTabResponse *))handler {

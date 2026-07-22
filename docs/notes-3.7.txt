@@ -520,6 +520,13 @@ Python API Improvements:
   sessions across tabs and windows. New
   sessions can be created in place with
   new_session leaves.
+- send_text can now optionally wait for the
+  text to be handed off to the session's write
+  pipeline before returning, via a new
+  wait_for_dispatch request field. The response
+  reports dispatched=true once every targeted
+  session has flushed the text. Off by default,
+  so existing callers are unchanged.
 
 Password Manager Improvements:
 - Bitwarden is now a supported password manager.
