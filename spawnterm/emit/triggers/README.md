@@ -7,9 +7,10 @@ running** — the passive/regex counterpart to the active `spawnterm-emit` helpe
 (#7). `scope:external-tooling` — this is static JSON that iTerm2 imports; it does
 **not** modify iTerm2 source.
 
-Both paths converge on the same user variables (`agent.status`, `agent.role`,
-`agent.task`) so the status board (#2/#8) reads one source of truth regardless of
-which path set it.
+Both paths converge on the same user variables (`agent_status`, `agent_role`,
+`agent_task`, exposed by iTerm2 as `user.agent_status` etc.) so the status board
+(#2/#8) reads one source of truth regardless of which path set it. The names are
+deliberately **dot-free** — see “Why underscored names” below.
 
 ## Files
 
@@ -23,7 +24,7 @@ which path set it.
    **Import…**, then pick `spawnterm-agent-status.triggers.json`.
    - iTerm2 asks which profile(s) to import into; choose your agent profile.
 3. The 8 rules appear in the list. Each row shows its regex and action; the
-   `Set User Variable` rows read `agent.status = <value>` and the `Post
+   `Set User Variable` rows read `agent_status = <value>` and the `Post
    Notification` rows show the message text.
 
 The importer accepts **either a single trigger dict or an array of dicts** and
@@ -75,15 +76,16 @@ actions used here:
   strings as `<name><SEP><value>` where `<SEP>` is the control character **U+0001
   (SOH)** — see `TwoParameterTriggerCodec.separator = "\u{1}"` in
   `sources/Triggers/SetUserVariableTrigger.swift`. In JSON that is the escape
-  `\u0001`, so the stored parameter for “set `agent.status` to `blocked`” is:
+  `\u0001`, so the stored parameter for “set `agent_status` to `blocked`” is:
 
   ```
-  "agent.status\u0001blocked"
+  "agent_status\u0001blocked"
   ```
 
   The trigger prepends `user.` itself at runtime (`setVariableNamed: "user." +
-  name`), so the resulting variable is `user.agent.status` — the same variable
-  `spawnterm-emit status` sets via the `SetUserVar=agent.status=…` escape code.
+  name`), so the resulting variable is `user.agent_status` — the same variable
+  `spawnterm-emit status` sets via the `SetUserVar=agent_status=…` escape code,
+  and the same variable the badge reads as `\(user.agent_status)`.
 
   > **Note — the issue guessed the parameter format as `user.agent.status=blocked`;
   > the verified iTerm2 format is the SOH-separated two-string codec above.** The
@@ -96,7 +98,7 @@ Each pattern is realized as **two** rules because one iTerm2 trigger performs on
 action: a `Set User Variable` rule and a `Post Notification` rule that share the
 same regex.
 
-| Pattern | Regex (summary) | `agent.status` | Notification |
+| Pattern | Regex (summary) | `agent_status` | Notification |
 | --- | --- | --- | --- |
 | **blocked** | `blocked`, `waiting for (your) input/response/confirmation/approval`, `awaiting …`, `needs your …`, `press enter/return to continue`, `[y/n]`, `(y/n)` — case-insensitive | `blocked` | “agent is blocked / waiting for input” |
 | **error** | `build failed/error`, `tests failed`, `N tests failing`, `fatal:`/`fatal error`, `^panic:`, Python `Traceback (most recent call last)`, `npm ERR!`, `FAIL`, Rust `error[E1234]` — case-insensitive | `error` | “agent hit a build/test error” |
@@ -124,15 +126,16 @@ Two paths, one source of truth:
 
 - **Active path — `spawnterm-emit`** (#7): the agent *chooses* to signal state by
   writing an escape code (`spawnterm-emit status blocked` →
-  `SetUserVar=agent.status=<base64>`). Precise, intentional.
+  `SetUserVar=agent_status=<base64>`). Precise, intentional.
 - **Passive path — these triggers** (#9): iTerm2 *watches the output* and sets the
   same variable when a known pattern appears, even for agents that never call
   `spawnterm-emit`. Zero cooperation required, zero daemon.
 
-Both write `user.agent.status` (and could write `user.agent.role` /
-`user.agent.task` similarly), so the status board / badge / colors (#2, #8) read
-one variable no matter who set it. Use them together: emit for the states the
-agent knows about, triggers as a safety net for the states it just prints.
+Both write `user.agent_status` (and could write `user.agent_role` /
+`user.agent_task` similarly), so the status board / badge / colors (#2, #8) read
+one variable no matter who set it — the badge template is `\(user.agent_status)`.
+Use them together: emit for the states the agent knows about, triggers as a safety
+net for the states it just prints.
 
 ## Feature flag
 
@@ -143,28 +146,24 @@ iTerm2, there is **no runtime gate** on the JSON itself (nothing here executes
 `spawnterm.status_board` is ON for the profile.** If the capability is off, leave
 them unimported (or toggle the rows off with `"disabled": true`).
 
-## Known limitation — dotted user-variable names
+## Why underscored names (`agent_status`, not `agent.status`)
 
-Current iTerm2 (this fork included) **rejects a user-variable name that contains a
-`.`** in both var-setting paths:
+iTerm2 **rejects a user-variable name that contains a `.`** in both var-setting
+paths:
 
 - Escape-code path: `PTYSession.screenSetUserVar:` returns early when the key
   contains `.` (`sources/PTYSession/PTYSession.m`, `if ([kvp.firstObject
   rangeOfString:@"."] …) { … return; }`).
 - Trigger path: `SetUserVariableTrigger.variableNameAndValue(_:)` returns `nil`
-  when the name contains `.` (`sources/Triggers/SetUserVariableTrigger.swift`,
+  when the name contains `.` (`sources/Triggers/SetUserVariableTrigger.swift:54`,
   `guard !key.contains(".")`).
 
-So on stock iTerm2 the `Set User Variable` rows — like `spawnterm-emit status`
-itself — will import fine and the **Post Notification** rows work, but the
-`agent.status` variable **is not actually set at runtime** because the name is
-dotted. This affects the active emit path (#7) identically; it is a cross-cutting
-iTerm2-core concern, not specific to #9. We deliberately keep the `agent.*`
-naming here to stay convergent with `spawnterm-emit` and the documented design
-(`spawnterm/docs/design.md`). The coordinated fix (a `scope:iterm2-core` change to
-allow the dotted `user.agent.*` frame, or a project-wide switch to a flat name
-such as `agentStatus` across emit + triggers together) should be tracked
-separately so both paths change in lockstep.
+So we use the **dot-free** name `agent_status`. With no `.` in the key the
+`guard !key.contains(".")` check passes and the variable **is** set at runtime;
+iTerm2 exposes it as `user.agent_status`. This matches the coordinated hotfix
+(#23) that moved the emit helper and the badge to the same underscored names, so
+the passive (trigger) and active (emit) paths converge on the identical variable
+the badge reads with `\(user.agent_status)`.
 
 ## Validation
 
