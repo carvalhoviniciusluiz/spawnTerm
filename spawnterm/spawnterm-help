@@ -80,8 +80,33 @@ find_flag() {
 	return 1
 }
 
+# --- locate spawnterm-i18n (sibling i18n/ dir, else PATH) --------------------
+# Proof-of-use of the i18n foundation (#66): the section header is pulled via
+# `spawnterm-i18n t`. This is best-effort — help must keep working when the
+# i18n helper is absent, so we fall back to the English literal.
+find_i18n() {
+	if [ -x "$SD/i18n/spawnterm-i18n" ]; then
+		printf '%s/i18n/spawnterm-i18n' "$SD"
+		return 0
+	fi
+	if command -v spawnterm-i18n >/dev/null 2>&1; then
+		command -v spawnterm-i18n
+		return 0
+	fi
+	return 1
+}
+
+i18n_t() {
+	# $1 = key, $2 = English fallback. Never fails: prints the fallback if the
+	# i18n helper is missing or errors.
+	if I18N="$(find_i18n)"; then
+		out="$("$I18N" t "$1" 2>/dev/null)" && [ -n "$out" ] && { printf '%s' "$out"; return; }
+	fi
+	printf '%s' "$2"
+}
+
 # --- append the live "Currently enabled" section (best-effort) ---------------
-printf '\n\n## Currently enabled (live)\n\n'
+printf '\n\n## %s\n\n' "$(i18n_t help.enabled_section 'Currently enabled (live)')"
 if FLAG="$(find_flag)"; then
 	# `spawnterm-flag list` prints one "spawnterm.<key> <on|off>" line per flag.
 	on_lines="$("$FLAG" list 2>/dev/null | grep ' on$')"
