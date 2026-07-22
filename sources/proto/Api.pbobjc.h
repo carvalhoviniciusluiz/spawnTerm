@@ -158,6 +158,7 @@ CF_EXTERN_C_BEGIN
 @class ITMServerOriginatedRPCResultRequest;
 @class ITMServerOriginatedRPCResultResponse;
 @class ITMServerOriginatedRPC_RPCArgument;
+@class ITMSessionFilter;
 @class ITMSessionSummary;
 @class ITMSetBroadcastDomainsRequest;
 @class ITMSetBroadcastDomainsResponse;
@@ -5116,7 +5117,61 @@ GPB_FINAL @interface ITMCodePointsPerCell : GPBMessage
 
 #pragma mark - ITMListSessionsRequest
 
+typedef GPB_ENUM(ITMListSessionsRequest_FieldNumber) {
+  ITMListSessionsRequest_FieldNumber_Filter = 1,
+};
+
 GPB_FINAL @interface ITMListSessionsRequest : GPBMessage
+
+/**
+ * spawnTerm extension (fork-only): optional server-side filter. When absent,
+ * every session is returned (unchanged default behavior). When present, only
+ * sessions matching the filter appear in the response; windows/tabs left with
+ * no matching sessions are omitted.
+ **/
+@property(nonatomic, readwrite, strong, null_resettable) ITMSessionFilter *filter;
+/** Test to see if @c filter has been set. */
+@property(nonatomic, readwrite) BOOL hasFilter;
+
+@end
+
+#pragma mark - ITMSessionFilter
+
+typedef GPB_ENUM(ITMSessionFilter_FieldNumber) {
+  ITMSessionFilter_FieldNumber_LabelKey = 1,
+  ITMSessionFilter_FieldNumber_LabelValue = 2,
+  ITMSessionFilter_FieldNumber_TitleSubstring = 3,
+};
+
+/**
+ * spawnTerm extension (fork-only): a descriptive filter over the session
+ * registry surfaced by ListSessions. All set constraints are ANDed; an empty
+ * filter (no fields set) matches every session. See SessionSummary.tags for how
+ * labels are derived from a session's user-vars.
+ **/
+GPB_FINAL @interface ITMSessionFilter : GPBMessage
+
+/**
+ * Require a matching label. With label_value set, requires the exact tag
+ * "<label_key>=<label_value>"; with only label_key set, requires any tag
+ * whose key is label_key; with only label_value set, requires any tag whose
+ * value is label_value.
+ **/
+@property(nonatomic, readwrite, copy, null_resettable) NSString *labelKey;
+/** Test to see if @c labelKey has been set. */
+@property(nonatomic, readwrite) BOOL hasLabelKey;
+
+@property(nonatomic, readwrite, copy, null_resettable) NSString *labelValue;
+/** Test to see if @c labelValue has been set. */
+@property(nonatomic, readwrite) BOOL hasLabelValue;
+
+/**
+ * Case-insensitive substring match against SessionSummary.title. Absent =
+ * no title constraint.
+ **/
+@property(nonatomic, readwrite, copy, null_resettable) NSString *titleSubstring;
+/** Test to see if @c titleSubstring has been set. */
+@property(nonatomic, readwrite) BOOL hasTitleSubstring;
 
 @end
 
@@ -5245,6 +5300,7 @@ typedef GPB_ENUM(ITMSessionSummary_FieldNumber) {
   ITMSessionSummary_FieldNumber_Frame = 2,
   ITMSessionSummary_FieldNumber_GridSize = 3,
   ITMSessionSummary_FieldNumber_Title = 4,
+  ITMSessionSummary_FieldNumber_TagsArray = 5,
 };
 
 GPB_FINAL @interface ITMSessionSummary : GPBMessage
@@ -5266,6 +5322,19 @@ GPB_FINAL @interface ITMSessionSummary : GPBMessage
 @property(nonatomic, readwrite, copy, null_resettable) NSString *title;
 /** Test to see if @c title has been set. */
 @property(nonatomic, readwrite) BOOL hasTitle;
+
+/**
+ * spawnTerm extension (fork-only): descriptive labels derived from the
+ * session's user-vars. Only the agent-identity subset is exposed: user-vars
+ * whose (dot-free) name begins with "agent_" (e.g. user.agent_status,
+ * user.agent_role, user.agent_task, user.agent_id set by spawnterm-emit).
+ * Each entry is "<name>=<value>", e.g. "agent_status=running". Other
+ * user-vars are intentionally not exposed. Sorted; empty when the session
+ * has no agent_* user-vars.
+ **/
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<NSString*> *tagsArray;
+/** The number of items in @c tagsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger tagsArray_Count;
 
 @end
 

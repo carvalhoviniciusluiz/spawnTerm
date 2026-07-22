@@ -527,6 +527,13 @@ Python API Improvements:
   reports dispatched=true once every targeted
   session has flushed the text. Off by default,
   so existing callers are unchanged.
+- list_sessions now reports each session's
+  agent_* user-vars as descriptive labels
+  ("agent_status=running") in the tags field of
+  SessionSummary, and accepts an optional filter
+  to return only sessions matching a label
+  key/value and/or a title substring. With no
+  filter it returns every session as before.
 
 Password Manager Improvements:
 - Bitwarden is now a supported password manager.

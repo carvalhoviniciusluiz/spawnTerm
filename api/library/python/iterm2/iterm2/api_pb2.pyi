@@ -5213,16 +5213,66 @@ Global___CodePointsPerCell: _TypeAlias = CodePointsPerCell  # noqa: Y015
 class ListSessionsRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
+    FILTER_FIELD_NUMBER: _builtins.int
+    @_builtins.property
+    def filter(self) -> Global___SessionFilter:
+        """spawnTerm extension (fork-only): optional server-side filter. When absent,
+        every session is returned (unchanged default behavior). When present, only
+        sessions matching the filter appear in the response; windows/tabs left with
+        no matching sessions are omitted.
+        """
+
     def __init__(
         self,
+        *,
+        filter: Global___SessionFilter | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["filter", b"filter"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["filter", b"filter"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ListSessionsRequest: _TypeAlias = ListSessionsRequest  # noqa: Y015
+
+@_typing.final
+class SessionFilter(_message.Message):
+    """spawnTerm extension (fork-only): a descriptive filter over the session
+    registry surfaced by ListSessions. All set constraints are ANDed; an empty
+    filter (no fields set) matches every session. See SessionSummary.tags for how
+    labels are derived from a session's user-vars.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    LABEL_KEY_FIELD_NUMBER: _builtins.int
+    LABEL_VALUE_FIELD_NUMBER: _builtins.int
+    TITLE_SUBSTRING_FIELD_NUMBER: _builtins.int
+    label_key: _builtins.str
+    """Require a matching label. With label_value set, requires the exact tag
+    "<label_key>=<label_value>"; with only label_key set, requires any tag
+    whose key is label_key; with only label_value set, requires any tag whose
+    value is label_value.
+    """
+    label_value: _builtins.str
+    title_substring: _builtins.str
+    """Case-insensitive substring match against SessionSummary.title. Absent =
+    no title constraint.
+    """
+    def __init__(
+        self,
+        *,
+        label_key: _builtins.str | None = ...,
+        label_value: _builtins.str | None = ...,
+        title_substring: _builtins.str | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["label_key", b"label_key", "label_value", b"label_value", "title_substring", b"title_substring"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["label_key", b"label_key", "label_value", b"label_value", "title_substring", b"title_substring"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___SessionFilter: _TypeAlias = SessionFilter  # noqa: Y015
 
 @_typing.final
 class SendTextRequest(_message.Message):
@@ -5381,6 +5431,7 @@ class SessionSummary(_message.Message):
     FRAME_FIELD_NUMBER: _builtins.int
     GRID_SIZE_FIELD_NUMBER: _builtins.int
     TITLE_FIELD_NUMBER: _builtins.int
+    TAGS_FIELD_NUMBER: _builtins.int
     unique_identifier: _builtins.str
     title: _builtins.str
     @_builtins.property
@@ -5391,6 +5442,17 @@ class SessionSummary(_message.Message):
     def grid_size(self) -> Global___Size:
         """will not be set for buried sessions"""
 
+    @_builtins.property
+    def tags(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """spawnTerm extension (fork-only): descriptive labels derived from the
+        session's user-vars. Only the agent-identity subset is exposed: user-vars
+        whose (dot-free) name begins with "agent_" (e.g. user.agent_status,
+        user.agent_role, user.agent_task, user.agent_id set by spawnterm-emit).
+        Each entry is "<name>=<value>", e.g. "agent_status=running". Other
+        user-vars are intentionally not exposed. Sorted; empty when the session
+        has no agent_* user-vars.
+        """
+
     def __init__(
         self,
         *,
@@ -5398,10 +5460,11 @@ class SessionSummary(_message.Message):
         frame: Global___Frame | None = ...,
         grid_size: Global___Size | None = ...,
         title: _builtins.str | None = ...,
+        tags: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["frame", b"frame", "grid_size", b"grid_size", "title", b"title", "unique_identifier", b"unique_identifier"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["frame", b"frame", "grid_size", b"grid_size", "title", b"title", "unique_identifier", b"unique_identifier"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["frame", b"frame", "grid_size", b"grid_size", "tags", b"tags", "title", b"title", "unique_identifier", b"unique_identifier"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

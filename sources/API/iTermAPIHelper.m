@@ -50,6 +50,7 @@
 #import "iTermSelection.h"
 #import "iTermSendTextDispatchAggregator.h"
 #import "iTermSessionLauncher.h"
+#import "iTermSessionRegistryFilter.h"
 #import "iTermStatusBarComponent.h"
 #import "iTermStatusBarViewController.h"
 #import "iTermUserDefaults.h"
@@ -2358,7 +2359,14 @@ static BOOL iTermAPIHelperLastApplescriptAuthRequiredSetting;
 
 - (void)apiServerListSessions:(ITMListSessionsRequest *)request
                       handler:(void (^)(ITMListSessionsResponse *))handler {
-    handler([self newListSessionsResponse]);
+    ITMListSessionsResponse *response = [self newListSessionsResponse];
+    // spawnTerm extension (fork-only): apply the optional server-side filter.
+    // When request.filter is absent the response is returned unchanged (every
+    // session), preserving the historical behavior.
+    if (request.hasFilter) {
+        [self filterListSessionsResponse:response withFilter:request.filter];
+    }
+    handler(response);
 }
 
 - (ITMListSessionsResponse *)newListSessionsResponse {
@@ -2400,7 +2408,132 @@ static BOOL iTermAPIHelperLastApplescriptAuthRequiredSetting;
         sessionSummary.title = session.name;
         [response.buriedSessionsArray addObject:sessionSummary];
     }
+    // spawnTerm extension (fork-only): attach descriptive labels (agent_* user
+    // vars) to every session summary. Done for all callers, including the
+    // layout-changed notification, since it is purely additive.
+    [self attachTagsToListSessionsResponse:response];
     return response;
+}
+
+#pragma mark - spawnTerm session registry (issue #50)
+
+// The agent-identity labels for a session, derived from its user-vars. Returns
+// an empty array for an unknown guid or a session with no agent_* user-vars.
+- (NSArray<NSString *> *)listSessionsTagsForSessionGUID:(NSString *)guid {
+    PTYSession *session = [[iTermController sharedInstance] anySessionWithGUID:guid];
+    if (!session) {
+        return @[];
+    }
+    NSDictionary<NSString *, NSString *> *userVariables =
+        [[session.variables discouragedValueForVariableName:@"user"] stringValuedDictionary];
+    return [iTermSessionRegistryFilter tagsFromUserVariables:userVariables ?: @{}];
+}
+
+// Recursively visits every session summary embedded in a split-tree node.
+- (void)enumerateSessionSummariesInSplitTreeNode:(ITMSplitTreeNode *)node
+                                           block:(void (^)(ITMSessionSummary *))block {
+    for (ITMSplitTreeNode_SplitTreeLink *link in node.linksArray) {
+        switch (link.childOneOfCase) {
+            case ITMSplitTreeNode_SplitTreeLink_Child_OneOfCase_Session:
+                block(link.session);
+                break;
+            case ITMSplitTreeNode_SplitTreeLink_Child_OneOfCase_Node:
+                [self enumerateSessionSummariesInSplitTreeNode:link.node block:block];
+                break;
+            case ITMSplitTreeNode_SplitTreeLink_Child_OneOfCase_GPBUnsetOneOfCase:
+                break;
+        }
+    }
+}
+
+- (void)attachTagsToListSessionsResponse:(ITMListSessionsResponse *)response {
+    void (^attach)(ITMSessionSummary *) = ^(ITMSessionSummary *summary) {
+        NSArray<NSString *> *tags = [self listSessionsTagsForSessionGUID:summary.uniqueIdentifier];
+        if (tags.count) {
+            [summary.tagsArray addObjectsFromArray:tags];
+        }
+    };
+    for (ITMListSessionsResponse_Window *window in response.windowsArray) {
+        for (ITMListSessionsResponse_Tab *tab in window.tabsArray) {
+            [self enumerateSessionSummariesInSplitTreeNode:tab.root block:attach];
+            for (ITMSessionSummary *summary in tab.minimizedSessionsArray) {
+                attach(summary);
+            }
+        }
+    }
+    for (ITMSessionSummary *summary in response.buriedSessionsArray) {
+        attach(summary);
+    }
+}
+
+- (BOOL)sessionSummary:(ITMSessionSummary *)summary matchesFilter:(ITMSessionFilter *)filter {
+    return [iTermSessionRegistryFilter tags:summary.tagsArray
+                                      title:summary.hasTitle ? summary.title : nil
+                              matchLabelKey:filter.hasLabelKey ? filter.labelKey : nil
+                                 labelValue:filter.hasLabelValue ? filter.labelValue : nil
+                             titleSubstring:filter.hasTitleSubstring ? filter.titleSubstring : nil];
+}
+
+// Prunes a split-tree node in place to only the session summaries that match
+// the filter, dropping child nodes that become empty. Returns YES if any
+// session survived under this node.
+- (BOOL)pruneSplitTreeNode:(ITMSplitTreeNode *)node withFilter:(ITMSessionFilter *)filter {
+    NSMutableArray<ITMSplitTreeNode_SplitTreeLink *> *kept = [NSMutableArray array];
+    for (ITMSplitTreeNode_SplitTreeLink *link in node.linksArray) {
+        switch (link.childOneOfCase) {
+            case ITMSplitTreeNode_SplitTreeLink_Child_OneOfCase_Session:
+                if ([self sessionSummary:link.session matchesFilter:filter]) {
+                    [kept addObject:link];
+                }
+                break;
+            case ITMSplitTreeNode_SplitTreeLink_Child_OneOfCase_Node:
+                if ([self pruneSplitTreeNode:link.node withFilter:filter]) {
+                    [kept addObject:link];
+                }
+                break;
+            case ITMSplitTreeNode_SplitTreeLink_Child_OneOfCase_GPBUnsetOneOfCase:
+                break;
+        }
+    }
+    node.linksArray = kept;
+    return kept.count > 0;
+}
+
+// Removes every session that does not match `filter` from `response`, dropping
+// tabs and windows that end up with no sessions. Buried sessions are filtered
+// too. Mutates `response` in place.
+- (void)filterListSessionsResponse:(ITMListSessionsResponse *)response
+                        withFilter:(ITMSessionFilter *)filter {
+    NSMutableArray<ITMListSessionsResponse_Window *> *keptWindows = [NSMutableArray array];
+    for (ITMListSessionsResponse_Window *window in response.windowsArray) {
+        NSMutableArray<ITMListSessionsResponse_Tab *> *keptTabs = [NSMutableArray array];
+        for (ITMListSessionsResponse_Tab *tab in window.tabsArray) {
+            const BOOL treeHasSessions = [self pruneSplitTreeNode:tab.root withFilter:filter];
+            NSMutableArray<ITMSessionSummary *> *keptMinimized = [NSMutableArray array];
+            for (ITMSessionSummary *summary in tab.minimizedSessionsArray) {
+                if ([self sessionSummary:summary matchesFilter:filter]) {
+                    [keptMinimized addObject:summary];
+                }
+            }
+            tab.minimizedSessionsArray = keptMinimized;
+            if (treeHasSessions || keptMinimized.count > 0) {
+                [keptTabs addObject:tab];
+            }
+        }
+        window.tabsArray = keptTabs;
+        if (keptTabs.count > 0) {
+            [keptWindows addObject:window];
+        }
+    }
+    response.windowsArray = keptWindows;
+
+    NSMutableArray<ITMSessionSummary *> *keptBuried = [NSMutableArray array];
+    for (ITMSessionSummary *summary in response.buriedSessionsArray) {
+        if ([self sessionSummary:summary matchesFilter:filter]) {
+            [keptBuried addObject:summary];
+        }
+    }
+    response.buriedSessionsArray = keptBuried;
 }
 
 - (void)apiServerSendText:(ITMSendTextRequest *)request handler:(void (^)(ITMSendTextResponse *))handler {
