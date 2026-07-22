@@ -1893,6 +1893,11 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         const CGFloat y = firstRowTop - row * rowHeight;
         NSButton *checkbox = [[NSButton alloc] initWithFrame:NSMakeRect(x, y, columnWidth - 10, checkboxHeight)];
         [checkbox setButtonType:NSButtonTypeSwitch];
+        // defineControl: does not wire target/action (XIB controls get it from IB);
+        // programmatically-created controls must connect it themselves, else a
+        // click never reaches -settingChanged: and the flag is not written.
+        checkbox.target = self;
+        checkbox.action = @selector(settingChanged:);
         // Labels come from the i18n catalog in the active language, falling back
         // to the built-in English map when spawnterm-i18n is unavailable.
         checkbox.title = [iTermSpawnTermCapabilities localizedNameForCapability:capability];
@@ -1935,6 +1940,10 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     NSPopUpButton *languagePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(leftMargin + labelWidth, languageRowY - 3, popupWidth, checkboxHeight + 6)
                                                               pullsDown:NO];
     languagePopup.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    // Wire the action so selecting a language reaches -settingChanged: (see the
+    // checkbox note above); without this the popup selection is never persisted.
+    languagePopup.target = self;
+    languagePopup.action = @selector(settingChanged:);
     for (NSString *code in [iTermSpawnTermCapabilities languageCodes]) {
         [languagePopup addItemWithTitle:[iTermSpawnTermCapabilities displayNameForLanguageCode:code]];
         languagePopup.lastItem.representedObject = code;
