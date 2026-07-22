@@ -379,6 +379,7 @@ extern NSString *const iTermAdvancedSettingsDidChange;
 + (NSString *)pathToTelnet;
 + (BOOL)performDictionaryLookupOnQuickLook;
 + (BOOL)performSQLiteIntegrityCheck;
++ (BOOL)persistUserVarsToSidecar;
 + (BOOL)pinEditSession;
 + (int)pinnedTabWidth;
 + (BOOL)pinchToChangeFontSizeDisabled;

@@ -675,6 +675,7 @@ DEFINE_STRING(sessionEndMessageText, @"", SECTION_SESSION @"Text displayed when 
 DEFINE_STRING(sessionEndMessageDividerCharacter, @"", SECTION_SESSION @"Character to use for divider lines in session end messages. Leave empty to use secure default (BrokenPipeDivider image). Examples: ━ ─ ═ ╌ ┄");
 DEFINE_STRING(sessionRestartedMessageText, @"Session Restarted", SECTION_SESSION @"Text displayed when a session is restarted.");
 DEFINE_STRING(sessionFinishedMessageText, @"Finished", SECTION_SESSION @"Text displayed when a short-lived session finishes.");
+DEFINE_BOOL(persistUserVarsToSidecar, NO, SECTION_SESSION @"Persist user-defined variables to a per-session sidecar file so they survive session end and app restart.\nWhen off (the default), user variables set with the SetUserVar control sequence only survive if a session arrangement with contents is saved.");
 
 #pragma mark - Windows
 

@@ -2163,3 +2163,11 @@ Bug Fixes:
   user name and password when a site returns
   an HTTP authentication challenge (Basic,
   Digest, or NTLM) instead of failing to load.
+- User-defined variables (set with the
+  SetUserVar control sequence) can now be
+  persisted to a per-session sidecar file so
+  they survive session end and app restart,
+  even without a saved arrangement. Off by
+  default; enable “Persist user-defined
+  variables to a per-session sidecar file” in
+  Advanced Settings.
