@@ -26,6 +26,14 @@ Major New Features:
   takes your API key, and walks you through
   pairing your phone.
 
+- Settings > General > AI now has a spawnTerm
+  tab with a checkbox per spawnTerm capability.
+  Each toggle reads and writes the feature flag
+  in ~/.config/spawnterm/config.toml through the
+  spawnterm-flag CLI, which stays the single
+  source of truth. If spawnterm-flag cannot be
+  found the checkboxes are shown disabled.
+
 - The Companion app can now receive push
   notifications for terminal alerts. Turn on
   "Send alerts to paired iPhone" in a profile's

@@ -24,6 +24,7 @@
 #import "iTermPreferenceDidChangeNotification.h"
 #import "iTermPreferences.h"
 #import "iTermRemotePreferences.h"
+#import "iTermSpawnTermCapabilities.h"
 #import "iTermUserDefaults.h"
 #import "iTermUserDefaultsObserver.h"
 
@@ -893,6 +894,15 @@ static NSString *sPreviousVersion;
 
                   kPreferenceKeyMenuActionImages: @YES,
               };
+        // spawnTerm capability toggles are backed by the config.toml feature
+        // flags (via spawnterm-flag), not NSUserDefaults. These placeholder
+        // defaults exist only so -defineControl: accepts the synthetic keys;
+        // the values are ignored — synthetic getter/setter own the real state.
+        NSMutableDictionary *withSpawnTermPlaceholders = [dict mutableCopy];
+        for (NSString *key in [iTermSpawnTermCapabilities allPreferenceKeys]) {
+            withSpawnTermPlaceholders[key] = @NO;  // ignored — synthetic value
+        }
+        dict = withSpawnTermPlaceholders;
     }
     return dict;
 }
