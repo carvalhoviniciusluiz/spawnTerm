@@ -52,6 +52,29 @@ Major New Features:
   CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
   yourself.
 
+- Agents now discover it2agent on their own.
+  The capability guide (AGENT_GUIDE.md,
+  it2agent help, the MCP help tool) is now
+  GENERATED from the feature-flag schema and
+  the MCP tool registry, so it can never go
+  stale: adding a capability updates the guide.
+  A new “it2agent brief” prints a short, live
+  summary of what is turned on right now.
+
+- A new agent capability, “Auto-Brief”
+  (agent.autobrief, default OFF), installs a
+  SessionStart Claude Code hook that injects
+  that brief into a fresh Claude’s context, so
+  it starts knowing the agentic tooling exists.
+  Like Team Bridge it writes the machine-local,
+  gitignored .claude/settings.local.json and
+  is a safe observer (always exits cleanly).
+  The it2agent MCP server is registered by you
+  with “claude mcp add” — it cannot be wired up
+  project-locally without either committing a
+  .mcp.json or editing your real ~/.claude.json,
+  so it2agent leaves that choice to you.
+
 - A new agent capability, "Claude Code
   Status Bar", adds an opt-in status-bar
   component that aggregates Claude Code session

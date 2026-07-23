@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# it2agent-autobrief-hook — SessionStart discovery hook (#113). scope:external-tooling.
+#
+# A thin launcher: the whole CLI is it2agent_autobrief_hook.py. On the event path
+# (session-start) it is an OBSERVER — it ALWAYS exits 0 and writes stdout ONLY the
+# SessionStart additionalContext JSON, and only when the gate (agent.autobrief ON)
+# is open, so it can never block or steer Claude Code. install/uninstall edit the
+# active project's gitignored .claude/settings.local.json. See it2agent/autobrief.
+here=$(cd "$(dirname "$0")" && pwd)
+exec python3 "$here/it2agent_autobrief_hook.py" "$@"

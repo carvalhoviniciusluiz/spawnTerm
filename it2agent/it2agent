@@ -24,6 +24,9 @@ $PROG — it2agent umbrella dispatcher.
 
 Usage:
   $PROG help              Print the capability guide (delegates to it2agent-help).
+  $PROG brief             Print a short, live summary of active capabilities.
+  $PROG guide [--check]   Regenerate AGENT_GUIDE.md from the flag schema + MCP
+                          tools (--check fails on drift).
   $PROG <cmd> [args...]   Run the sibling tool it2agent-<cmd> (e.g. flag, emit,
                           spawn, broker, review, janitor, cost, inbox, mcp, tmux).
   $PROG -h | --help       Show this help.

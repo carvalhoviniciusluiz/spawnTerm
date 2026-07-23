@@ -47,7 +47,8 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                          @"team_bridge",
                          @"canonical_port",
                          @"isolate_docker",
-                         @"isolate_db" ];
+                         @"isolate_db",
+                         @"autobrief" ];
     });
     return identifiers;
 }
@@ -86,7 +87,8 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                    @"team_bridge": @"Team Bridge",
                    @"canonical_port": @"Canonical Port",
                    @"isolate_docker": @"Docker Isolation",
-                   @"isolate_db": @"DB Isolation" };
+                   @"isolate_db": @"DB Isolation",
+                   @"autobrief": @"Auto-Brief" };
     });
     NSString *name = names[capability];
     if (name) {
@@ -121,7 +123,8 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                           @"team_bridge": @"Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session’s death.",
                           @"canonical_port": @"The focused agent also answers on the normal localhost port (e.g. 3000), not just its dynamic one.",
                           @"isolate_docker": @"Sets COMPOSE_PROJECT_NAME per agent so Docker Compose stacks don’t collide.",
-                          @"isolate_db": @"Exports a per-agent Postgres schema/search_path so agents don’t share DB state." };
+                          @"isolate_db": @"Exports a per-agent Postgres schema/search_path so agents don’t share DB state.",
+                          @"autobrief": @"On each Claude Code session start, injects a short it2agent capabilities brief into the agent’s context so it discovers the tooling automatically." };
     });
     NSString *description = descriptions[capability];
     return description ?: @"";

@@ -101,8 +101,10 @@ echo "$SH_LIST" | grep -q "^agent.canonical_port *off$" && ok "list shows canoni
 # #111: isolate_docker / isolate_db flags are registered and default OFF.
 echo "$SH_LIST" | grep -q "^agent.isolate_docker *off$" && ok "list shows isolate_docker off" || fail "list isolate_docker"
 echo "$SH_LIST" | grep -q "^agent.isolate_db *off$" && ok "list shows isolate_db off" || fail "list isolate_db"
+# #113: autobrief flag is registered and default OFF.
+echo "$SH_LIST" | grep -q "^agent.autobrief *off$" && ok "list shows autobrief off" || fail "list autobrief"
 LIST_COUNT="$(printf '%s\n' "$SH_LIST" | grep -c '^agent\.')"
-[ "$LIST_COUNT" = "19" ] && ok "list shows 19 flags" || fail "list flag count = $LIST_COUNT, want 19"
+[ "$LIST_COUNT" = "20" ] && ok "list shows 20 flags" || fail "list flag count = $LIST_COUNT, want 20"
 assert_query run_shell "shell: native_status accepted (OFF)" agent.native_status 0 1
 assert_query run_py    "py:    native_status accepted (OFF)" native_status           0 1
 assert_query run_shell "shell: team_bridge accepted (OFF)" agent.team_bridge 0 1
@@ -113,6 +115,8 @@ assert_query run_shell "shell: isolate_docker accepted (OFF)" agent.isolate_dock
 assert_query run_py    "py:    isolate_docker accepted (OFF)" isolate_docker           0 1
 assert_query run_shell "shell: isolate_db accepted (OFF)" agent.isolate_db 0 1
 assert_query run_py    "py:    isolate_db accepted (OFF)" isolate_db           0 1
+assert_query run_shell "shell: autobrief accepted (OFF)" agent.autobrief 0 1
+assert_query run_py    "py:    autobrief accepted (OFF)" autobrief           0 1
 
 echo "== canonical file byte-for-byte parity (shell vs python writer) =="
 reset

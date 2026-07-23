@@ -195,6 +195,42 @@ to govern availability. The broker socket/db locations honor the standard
 `IT2AGENT_BROKER_SOCK` / `IT2AGENT_BROKER_DB` overrides (see
 [`it2agent/broker/README.md`](../broker/README.md)).
 
+### Scope: why registration is operator-run, not auto-installed (#113)
+
+The it2agent convention writes Claude-config to the project's **gitignored**
+`.claude/settings.local.json` (see
+[`docs/claude-config-convention.md`](../docs/claude-config-convention.md)).
+**MCP servers cannot be registered there.** Per the official Claude Code docs
+([settings](https://code.claude.com/docs/en/settings.md),
+[mcp](https://code.claude.com/docs/en/mcp.md)), `settings.json` /
+`settings.local.json` do **not** support an `mcpServers` key; MCP registration
+lives in different files, keyed by `claude mcp add --scope`:
+
+| `--scope` | Written to | Committed? | Machine-local? |
+| --- | --- | --- | --- |
+| `local` (default) | `~/.claude.json` (per-project section) | no | yes, but in the operator's **real** `~/.claude.json` |
+| `project` | `<repo>/.mcp.json` | **yes** (shared with everyone who clones) | no |
+| `user` | `~/.claude.json` (global) | no | yes |
+
+So there is **no** file that is both project-local *and* not-committed *and*
+outside the operator's real home dir. `project` scope commits `.mcp.json` into
+the user's repo (which we must not do), and `local`/`user` scope both write the
+operator's real `~/.claude.json` (which our tooling must never touch). We
+therefore **do not auto-register the MCP server** — it is documented-manual. Run
+whichever the operator prefers, themselves:
+
+```sh
+# Not committed; lives in YOUR ~/.claude.json, only for this project:
+claude mcp add --scope local it2agent -- python3 /ABS/PATH/it2agent/mcp/it2agent_mcp.py
+
+# Committed & shared with the repo (only if the whole team wants it):
+claude mcp add --scope project it2agent -- python3 /ABS/PATH/it2agent/mcp/it2agent_mcp.py
+```
+
+Discovery still works without the MCP connection: `it2agent brief` / the
+SessionStart **autobrief** hook tell a fresh Claude the tools exist and how to
+enable `agent.mcp`, and the `help` tool returns the full guide once connected.
+
 ## Tests
 
 ```sh
