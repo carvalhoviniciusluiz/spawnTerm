@@ -137,6 +137,69 @@ class TestMailboxPure(unittest.TestCase):
     def test_ack_cursor_defaults_zero(self):
         self.assertEqual(mailbox.ack_cursor(self.conn, "never-seen"), 0)
 
+    def test_idempotent_send_dedups_same_recipient_key(self):
+        # #95: same (recipient, key) twice → one row, same id, second is a dedup.
+        first_id, first_dedup = mailbox.send_message_idempotent(
+            self.conn, "s", "agent1", "hello", key="k1"
+        )
+        second_id, second_dedup = mailbox.send_message_idempotent(
+            self.conn, "s", "agent1", "hello-again", key="k1"
+        )
+        self.assertFalse(first_dedup)
+        self.assertTrue(second_dedup)
+        self.assertEqual(second_id, first_id)
+        rows = self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE recipient='agent1'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 1)
+        # The stored body is the ORIGINAL (the dedup never overwrites).
+        polled = mailbox.poll_messages(self.conn, "agent1")
+        self.assertEqual([m["body"] for m in polled], ["hello"])
+
+    def test_idempotent_send_different_keys_insert_separately(self):
+        a_id, a_dedup = mailbox.send_message_idempotent(
+            self.conn, "s", "agent1", "a", key="k1"
+        )
+        b_id, b_dedup = mailbox.send_message_idempotent(
+            self.conn, "s", "agent1", "b", key="k2"
+        )
+        self.assertFalse(a_dedup)
+        self.assertFalse(b_dedup)
+        self.assertNotEqual(a_id, b_id)
+        rows = self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE recipient='agent1'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 2)
+
+    def test_idempotent_send_scoped_per_recipient(self):
+        # Same key, different recipients → NOT a dedup (dedup is per recipient).
+        a_id, a_dedup = mailbox.send_message_idempotent(
+            self.conn, "s", "agentA", "x", key="shared"
+        )
+        b_id, b_dedup = mailbox.send_message_idempotent(
+            self.conn, "s", "agentB", "x", key="shared"
+        )
+        self.assertFalse(a_dedup)
+        self.assertFalse(b_dedup)
+        self.assertNotEqual(a_id, b_id)
+
+    def test_keyless_send_always_inserts(self):
+        # Legacy path: no key → always a fresh row, never dedups.
+        first = mailbox.send_message(self.conn, "s", "agent1", "same")
+        second = mailbox.send_message(self.conn, "s", "agent1", "same")
+        self.assertNotEqual(first, second)
+        keys = self.conn.execute(
+            "SELECT idempotency_key FROM messages WHERE recipient='agent1'"
+        ).fetchall()
+        self.assertEqual([k[0] for k in keys], [None, None])
+
+    def test_find_message_id_by_key(self):
+        mid = mailbox.send_message(self.conn, "s", "agent1", "x", key="findme")
+        self.assertEqual(mailbox.find_message_id_by_key(self.conn, "agent1", "findme"), mid)
+        self.assertIsNone(mailbox.find_message_id_by_key(self.conn, "agent1", "nope"))
+        # Key is recipient-scoped.
+        self.assertIsNone(mailbox.find_message_id_by_key(self.conn, "other", "findme"))
+
     def test_durability_across_reopen(self):
         mid = mailbox.send_message(self.conn, "a", "agent1", "survive-restart")
         mailbox.poll_messages(self.conn, "agent1")
@@ -188,6 +251,50 @@ class TestMailboxOps(unittest.TestCase):
         self.assertEqual(acked["cursor"], mid)
         again = dispatch.handle({"op": "poll", "agent": "agent1"}, self.ctx)
         self.assertEqual(again["count"], 0)
+
+    def test_send_with_key_dedups_over_dispatch(self):
+        req = {"op": "send", "to": "agent1", "from": "boss", "body": "do-it", "key": "k1"}
+        first = dispatch.handle(req, self.ctx)
+        self.assertTrue(first["ok"])
+        self.assertNotIn("dedup", first)  # first insert carries no dedup flag
+        mid = first["id"]
+        second = dispatch.handle(dict(req, body="different"), self.ctx)
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["id"], mid)
+        self.assertTrue(second["dedup"])
+        # Only one message actually landed.
+        polled = dispatch.handle({"op": "poll", "agent": "agent1"}, self.ctx)
+        self.assertEqual(polled["count"], 1)
+        self.assertEqual(polled["messages"][0]["body"], "do-it")
+
+    def test_send_different_keys_insert_over_dispatch(self):
+        a = dispatch.handle(
+            {"op": "send", "to": "a1", "from": "s", "body": "a", "key": "k1"}, self.ctx
+        )
+        b = dispatch.handle(
+            {"op": "send", "to": "a1", "from": "s", "body": "b", "key": "k2"}, self.ctx
+        )
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertNotIn("dedup", b)
+        polled = dispatch.handle({"op": "poll", "agent": "a1"}, self.ctx)
+        self.assertEqual(polled["count"], 2)
+
+    def test_send_without_key_never_dedups_over_dispatch(self):
+        req = {"op": "send", "to": "a1", "from": "s", "body": "same"}
+        first = dispatch.handle(req, self.ctx)
+        second = dispatch.handle(req, self.ctx)
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertNotIn("dedup", first)
+        self.assertNotIn("dedup", second)
+
+    def test_send_bad_key_error(self):
+        for bad_key in ("", 5, True):
+            resp = dispatch.handle(
+                {"op": "send", "to": "a1", "from": "s", "body": "b", "key": bad_key},
+                self.ctx,
+            )
+            self.assertFalse(resp["ok"], bad_key)
+            self.assertEqual(resp["error"]["code"], "bad_request", bad_key)
 
     def test_fetch_is_alias_for_poll(self):
         dispatch.handle({"op": "send", "to": "a1", "from": "s", "body": "hi"}, self.ctx)

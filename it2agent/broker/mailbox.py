@@ -30,11 +30,20 @@ Semantics
   ``agent``'s messages with ``id <= msg_id`` and advances the per-agent
   high-water cursor to ``max(existing, msg_id)`` (never rewinds). Acking is
   idempotent — re-acking the same id acks nothing new and leaves the cursor put.
-* **Idempotent send** — we do **not** dedup by content: every ``send`` appends a
-  new row with a fresh id. Exactly-once is guaranteed at the **ack layer**, not
-  the send layer: an acked message (``id <= cursor``) is never returned again, so
-  delivery is exactly-once *per cursor+ack*. A caller that wants to suppress
-  duplicate work should ack.
+* **Idempotent send** — by default we do **not** dedup by content: every ``send``
+  appends a new row with a fresh id. Exactly-once is guaranteed at the **ack
+  layer**, not the send layer: an acked message (``id <= cursor``) is never
+  returned again, so delivery is exactly-once *per cursor+ack*. A caller that
+  wants to suppress duplicate work should ack.
+* **Idempotency key (#95)** — a ``send`` may carry an optional ``key`` string.
+  When present the broker dedups on ``(recipient, key)``: if a message with that
+  key already exists for that recipient it returns the EXISTING id (with
+  ``dedup: true``) instead of inserting a second row. This makes an at-least-once
+  retry of the *same* logical send safe (e.g. the team bridge re-firing a
+  TaskCompleted notification). Without a ``key`` the send behaves exactly as
+  before — always inserts, no ``dedup`` field. The uniqueness is also enforced by
+  a partial-unique index (schema v4), so a lost insert race collapses back to the
+  winning row rather than duplicating.
 * **Durability** — everything is committed sqlite state (WAL); nothing is held in
   memory, so no message is lost across a broker restart.
 """
@@ -76,20 +85,75 @@ def send_message(
     recipient: str,
     body: str,
     created_at: Optional[float] = None,
+    key: Optional[str] = None,
 ) -> int:
     """Append one message to ``recipient``'s queue; return its monotonic id.
 
-    Always creates a new row (no content dedup) — see the module docstring on
-    idempotency. The returned id is the FIFO ordering key.
+    Always creates a new row — see the module docstring on idempotency. The
+    returned id is the FIFO ordering key. ``key`` (when given) is stored in the
+    ``idempotency_key`` column; this low-level insert does NOT itself dedup — use
+    :func:`send_message_idempotent` for the dedup-on-``(recipient, key)`` path.
     """
     ts = time.time() if created_at is None else created_at
     cursor = conn.execute(
-        "INSERT INTO messages(sender, recipient, body, created_at, state) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (sender, recipient, body, ts, PENDING),
+        "INSERT INTO messages(sender, recipient, body, created_at, state, idempotency_key) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (sender, recipient, body, ts, PENDING, key),
     )
     conn.commit()
     return int(cursor.lastrowid)
+
+
+def find_message_id_by_key(
+    conn: sqlite3.Connection,
+    recipient: str,
+    key: str,
+) -> Optional[int]:
+    """Return the id of ``recipient``'s message with idempotency ``key``, or None.
+
+    There is at most one (the partial-unique index enforces it); if several
+    somehow exist we return the earliest by id (the FIFO original).
+    """
+    row = conn.execute(
+        "SELECT id FROM messages WHERE recipient = ? AND idempotency_key = ? "
+        "ORDER BY id LIMIT 1",
+        (recipient, key),
+    ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
+def send_message_idempotent(
+    conn: sqlite3.Connection,
+    sender: str,
+    recipient: str,
+    body: str,
+    key: str,
+    created_at: Optional[float] = None,
+) -> tuple[int, bool]:
+    """Dedup-aware send. Return ``(id, deduped)`` for ``(recipient, key)``.
+
+    If a message with ``key`` already exists for ``recipient`` its existing id is
+    returned with ``deduped=True`` and no new row is written. Otherwise a fresh
+    row is inserted and ``(new_id, False)`` is returned. A concurrent insert that
+    loses the partial-unique-index race is caught and collapsed back to the
+    winning row (``deduped=True``) rather than propagating an IntegrityError.
+    """
+    existing = find_message_id_by_key(conn, recipient, key)
+    if existing is not None:
+        return existing, True
+    try:
+        new_id = send_message(
+            conn, sender=sender, recipient=recipient, body=body,
+            created_at=created_at, key=key,
+        )
+    except sqlite3.IntegrityError:
+        # Lost the race to another writer; the winning row is now present.
+        conn.rollback()
+        winner = find_message_id_by_key(conn, recipient, key)
+        if winner is None:
+            raise
+        return winner, True
+    return new_id, False
 
 
 def poll_messages(
@@ -183,7 +247,12 @@ def _require_str(request: dict, key: str) -> tuple[Optional[str], Optional[dict]
 
 @register("send")
 def _send(request: dict, ctx: BrokerContext) -> dict[str, Any]:
-    """``{op:"send", to, from, body}`` → append a message, return its id."""
+    """``{op:"send", to, from, body, key?}`` → append a message, return its id.
+
+    Optional ``key`` (idempotency key) dedups on ``(to, key)``: a repeat send with
+    the same recipient+key returns the EXISTING id and ``dedup: true`` instead of
+    inserting again. Omit ``key`` for the legacy always-insert behavior.
+    """
     recipient, err = _require_str(request, "to")
     if err:
         return err
@@ -193,7 +262,17 @@ def _send(request: dict, ctx: BrokerContext) -> dict[str, Any]:
     body = request.get("body")
     if not isinstance(body, str):
         return error("bad_request", "missing or non-string 'body' field")
-    msg_id = send_message(ctx.conn, sender=sender, recipient=recipient, body=body)
+    key = request.get("key")
+    if key is not None and (not isinstance(key, str) or not key):
+        return error("bad_request", "'key' must be a non-empty string when provided")
+    if key is None:
+        msg_id = send_message(ctx.conn, sender=sender, recipient=recipient, body=body)
+        return ok(id=msg_id)
+    msg_id, deduped = send_message_idempotent(
+        ctx.conn, sender=sender, recipient=recipient, body=body, key=key
+    )
+    if deduped:
+        return ok(id=msg_id, dedup=True)
     return ok(id=msg_id)
 
 

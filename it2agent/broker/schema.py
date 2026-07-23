@@ -24,8 +24,9 @@ import time
 from pathlib import Path
 
 # Bump when a new migration is appended below. Equals the highest migration
-# version (#35 owns v2 `messages`; #36 owns v3 `agents` + `handoffs`).
-SCHEMA_VERSION = 3
+# version (#35 owns v2 `messages`; #36 owns v3 `agents` + `handoffs`;
+# #95 owns v4 `messages.idempotency_key` + its partial-unique index).
+SCHEMA_VERSION = 4
 
 # Busy timeout for lock contention across processes (WAL still serializes
 # writers). Seconds for the sqlite3.connect timeout; ms for the PRAGMA.
@@ -102,6 +103,23 @@ MIGRATIONS: dict[int, list[str]] = {
         ")",
         "CREATE INDEX IF NOT EXISTS idx_handoffs_agent_goal "
         "ON handoffs(agent_id, goal, id)",
+    ],
+    # v4 (#95 idempotent send): add an optional idempotency key to messages so
+    # an at-least-once retry of `send` (e.g. the team bridge re-firing a
+    # TaskCompleted) dedups instead of appending a duplicate. Purely additive:
+    #   * a nullable `idempotency_key` column — legacy rows and keyless sends
+    #     leave it NULL, so existing behavior is unchanged;
+    #   * a PARTIAL unique index on (recipient, idempotency_key) WHERE the key is
+    #     non-null — this enforces at-most-one message per (recipient, key) at
+    #     the db level while leaving NULL-key rows completely unconstrained
+    #     (SQLite treats NULLs as distinct, and the partial predicate excludes
+    #     them entirely). This migration ALTERs the table created in v2, so it
+    #     upgrades an existing db in place — no fresh db required.
+    4: [
+        "ALTER TABLE messages ADD COLUMN idempotency_key TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_recipient_idempotency_key"
+        "  ON messages(recipient, idempotency_key)"
+        "  WHERE idempotency_key IS NOT NULL",
     ],
 }
 

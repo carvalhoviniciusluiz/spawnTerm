@@ -248,8 +248,21 @@ class TestBuildOps(unittest.TestCase):
         self.assertEqual(ops[0]["goal"], "task:T1")
         self.assertEqual(
             ops[1],
-            {"op": "send", "to": "lead", "from": KEY, "body": "task:T1 completed"},
+            {
+                "op": "send",
+                "to": "lead",
+                "from": KEY,
+                "body": "task:T1 completed",
+                "key": "task:T1:completed",
+            },
         )
+
+    def test_completed_send_carries_idempotency_key(self):
+        # #95: the TaskCompleted send must carry key=task:<id>:completed so a
+        # re-fired completion dedups at the broker instead of duplicating.
+        op = hook.build_completed_send_op(COMPLETED_NESTED)
+        self.assertEqual(op["key"], "task:T1:completed")
+        self.assertEqual(op["op"], "send")
 
     def test_unknown_event_no_ops(self):
         self.assertEqual(hook.build_ops("Nope", CREATED_NESTED), [])
