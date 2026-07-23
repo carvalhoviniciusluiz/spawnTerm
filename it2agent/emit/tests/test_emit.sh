@@ -90,6 +90,17 @@ parity "color-rawhex"      color a1b2c3
 parity "color-rgbshort"    color fff
 parity "badge-default"     badge
 parity "badge-custom"      badge '\(user.agent_role): \(user.agent_status)'
+# #87: native OSC 21337 tab-status facet (ccstatus).
+parity "ccstatus-busy"      ccstatus busy
+parity "ccstatus-blocked"   ccstatus blocked
+parity "ccstatus-done"      ccstatus done
+parity "ccstatus-idle"      ccstatus idle
+parity "ccstatus-detail"    ccstatus busy --detail "building #42"
+parity "ccstatus-clear"     ccstatus clear
+parity "ccstatus-freetext"  ccstatus "Reviewing PR"
+parity "ccstatus-freetext-detail" ccstatus "Reviewing PR" --detail "waiting on CI"
+# Text with the native metacharacters ; and \ must be escaped identically.
+parity "ccstatus-escaping"  ccstatus 'a;b\c' --detail 'x;y\z'
 
 echo
 echo "--- 1b. color palette + badge base64 correctness ---"
@@ -119,6 +130,40 @@ else
 fi
 
 echo
+echo "--- 1c. ccstatus native OSC 21337 exact bytes (#87) ---"
+# The native channel is literal (NOT base64): values appear verbatim, ; and \
+# escaped as \; and \\, empty value clears a key. Assert exact emitted bytes.
+check_ccstatus() {
+	local label="$1" want="$2"; shift 2
+	local sh_out py_out
+	sh_out="$(IT2AGENT_FORCE=1 sh "$SH" "$@")"
+	py_out="$(IT2AGENT_FORCE=1 python3 "$PY" "$@")"
+	if [ "$sh_out" = "$want" ] && [ "$py_out" = "$want" ]; then
+		green "$label -> $(printf '%s' "$want" | cat -v)"
+	else
+		red "$label wrong bytes: sh=[$(printf '%s' "$sh_out" | cat -v)] py=[$(printf '%s' "$py_out" | cat -v)] want=[$(printf '%s' "$want" | cat -v)]"
+	fi
+}
+check_ccstatus "ccstatus busy" \
+	"$(printf '\033]21337;status=Busy;indicator=#0072B2\007')" ccstatus busy
+check_ccstatus "ccstatus blocked" \
+	"$(printf '\033]21337;status=Blocked;indicator=#E69F00\007')" ccstatus blocked
+check_ccstatus "ccstatus done" \
+	"$(printf '\033]21337;status=Done;indicator=#009E73\007')" ccstatus done
+check_ccstatus "ccstatus idle" \
+	"$(printf '\033]21337;status=Idle;indicator=#999999\007')" ccstatus idle
+check_ccstatus "ccstatus busy --detail" \
+	"$(printf '\033]21337;status=Busy;indicator=#0072B2;detail=x\007')" ccstatus busy --detail x
+check_ccstatus "ccstatus clear" \
+	"$(printf '\033]21337;status=;indicator=;detail=\007')" ccstatus clear
+# Free text: literal status, no indicator.
+check_ccstatus "ccstatus free text" \
+	"$(printf '\033]21337;status=Reviewing PR\007')" ccstatus "Reviewing PR"
+# Escaping: ; -> \; and \ -> \\ in both status text and detail.
+check_ccstatus "ccstatus escaping" \
+	"$(printf '\033]21337;status=a\\;b\\\\c;detail=x\\;y\\\\z\007')" ccstatus 'a;b\c' --detail 'x;y\z'
+
+echo
 echo "--- 2. feature-flag gating ---"
 # We keep the real PATH (so sh/python3/base64/tr resolve) and control only
 # whether a `it2agent-flag` shim is visible, by prepending a temp dir.
@@ -128,6 +173,11 @@ FLAG_ON="$TMP_BASE/on"; mkdir -p "$FLAG_ON"
 printf '#!/bin/sh\necho 0\nexit 1\n' > "$FLAG_OFF/it2agent-flag"
 printf '#!/bin/sh\necho 1\nexit 0\n' > "$FLAG_ON/it2agent-flag"
 chmod +x "$FLAG_OFF/it2agent-flag" "$FLAG_ON/it2agent-flag"
+# Key-aware shim: ON only for agent.native_status, OFF for everything else.
+# Proves ccstatus gates on native_status specifically (not status_board).
+FLAG_NATIVE="$TMP_BASE/native"; mkdir -p "$FLAG_NATIVE"
+printf '#!/bin/sh\ncase "$1" in\nagent.native_status) echo 1; exit 0 ;;\n*) echo 0; exit 1 ;;\nesac\n' > "$FLAG_NATIVE/it2agent-flag"
+chmod +x "$FLAG_NATIVE/it2agent-flag"
 
 if command -v it2agent-flag >/dev/null 2>&1; then
 	printf '  \033[33mNOTE\033[0m a real it2agent-flag is on PATH; "absent" test may be affected\n'
@@ -148,6 +198,11 @@ expect_empty "shell:  color flag OFF -> no output"  gate_env env PATH="$FLAG_OFF
 expect_empty "python: color flag OFF -> no output"  gate_env env PATH="$FLAG_OFF:$PATH" python3 "$PY" color busy
 expect_empty "shell:  badge flag OFF -> no output"  gate_env env PATH="$FLAG_OFF:$PATH" sh "$SH" badge
 expect_empty "shell:  color flag absent -> no output"  gate_env sh "$SH" color busy
+# ccstatus (#87) gates on agent.native_status. OFF / absent -> no output, exit 0.
+expect_empty "shell:  ccstatus flag OFF -> no output"  gate_env env PATH="$FLAG_OFF:$PATH" sh "$SH" ccstatus busy
+expect_empty "python: ccstatus flag OFF -> no output"  gate_env env PATH="$FLAG_OFF:$PATH" python3 "$PY" ccstatus busy
+expect_empty "shell:  ccstatus flag absent -> no output"  gate_env sh "$SH" ccstatus busy
+expect_exit  "shell:  ccstatus flag OFF exits 0"  0  gate_env env PATH="$FLAG_OFF:$PATH" sh "$SH" ccstatus busy
 
 # Flag helper reports ON (prints 1, exit 0) => both emit, byte-identical.
 on_sh="$(gate_env env PATH="$FLAG_ON:$PATH" sh "$SH" mark | hexof)"
@@ -157,6 +212,23 @@ if [ -n "$on_sh" ] && [ "$on_sh" = "$on_py" ]; then
 else
 	red "flag ON emit mismatch (sh=$on_sh py=$on_py)"
 fi
+# Flag ON => ccstatus emits too.
+cc_sh="$(gate_env env PATH="$FLAG_ON:$PATH" sh "$SH" ccstatus busy | hexof)"
+cc_py="$(gate_env env PATH="$FLAG_ON:$PATH" python3 "$PY" ccstatus busy | hexof)"
+if [ -n "$cc_sh" ] && [ "$cc_sh" = "$cc_py" ]; then
+	green "ccstatus flag ON -> both emit, byte-identical ($cc_sh)"
+else
+	red "ccstatus flag ON emit mismatch (sh=$cc_sh py=$cc_py)"
+fi
+# Key-aware shim: native_status ON but status_board OFF. ccstatus emits;
+# a status-board command (status) stays gated off. Proves the split gate.
+cc_native="$(gate_env env PATH="$FLAG_NATIVE:$PATH" sh "$SH" ccstatus busy | hexof)"
+if [ -n "$cc_native" ]; then
+	green "ccstatus emits when only native_status is ON ($cc_native)"
+else
+	red "ccstatus did not emit with native_status ON"
+fi
+expect_empty "shell:  status stays gated when only native_status is ON"  gate_env env PATH="$FLAG_NATIVE:$PATH" sh "$SH" status x
 # --no-gate must bypass even when the flag reports OFF.
 expect_exit "shell:  --no-gate bypasses OFF (emits, exit 0)" 0 \
 	gate_env env PATH="$FLAG_OFF:$PATH" sh "$SH" --no-gate mark
@@ -187,6 +259,14 @@ expect_exit "shell:  color missing arg"    2  env IT2AGENT_FORCE=1 sh "$SH" colo
 expect_exit "python: color missing arg"    2  env IT2AGENT_FORCE=1 python3 "$PY" color
 expect_exit "shell:  color too many args"  2  env IT2AGENT_FORCE=1 sh "$SH" color busy idle
 expect_exit "python: color too many args"  2  env IT2AGENT_FORCE=1 python3 "$PY" color busy idle
+expect_exit "shell:  ccstatus missing arg"  2  env IT2AGENT_FORCE=1 sh "$SH" ccstatus
+expect_exit "python: ccstatus missing arg"  2  env IT2AGENT_FORCE=1 python3 "$PY" ccstatus
+expect_exit "shell:  ccstatus too many args" 2  env IT2AGENT_FORCE=1 sh "$SH" ccstatus busy idle
+expect_exit "python: ccstatus too many args" 2  env IT2AGENT_FORCE=1 python3 "$PY" ccstatus busy idle
+expect_exit "shell:  ccstatus --detail no value" 2  env IT2AGENT_FORCE=1 sh "$SH" ccstatus busy --detail
+expect_exit "python: ccstatus --detail no value" 2  env IT2AGENT_FORCE=1 python3 "$PY" ccstatus busy --detail
+expect_exit "shell:  ccstatus clear + --detail" 2  env IT2AGENT_FORCE=1 sh "$SH" ccstatus clear --detail x
+expect_exit "python: ccstatus clear + --detail" 2  env IT2AGENT_FORCE=1 python3 "$PY" ccstatus clear --detail x
 
 echo
 echo "--- 4. --help exits 0 on both ---"

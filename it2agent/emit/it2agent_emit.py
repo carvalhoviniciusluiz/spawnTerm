@@ -10,7 +10,13 @@ Framing (per iTerm2 "Proprietary Escape Codes" docs):
     OSC = ESC ]   (0x1b 0x5d)
     ST  = BEL     (0x07)   <- iTerm2-documented terminator
 
-Gating: gates on the feature flag `agent.status_board` via the external
+The `ccstatus` command cooperates with iTerm2's NATIVE tab-status channel
+(OSC 21337 — the one feeding the native tab status + Cockpit / cc-status),
+whose values are LITERAL (not base64) semicolon-delimited key=value pairs with
+`\\;`/`\\\\` escaping and empty-clears-a-key semantics.
+
+Gating: most commands gate on the feature flag `agent.status_board`; `ccstatus`
+gates on the separate `agent.native_status`. Both are checked via the external
 `it2agent-flag` helper (#11). If the flag is OFF/absent, or it2agent-flag is
 not on PATH, emit nothing and exit 0 quietly (fail-safe: off by default).
 Bypass with `--no-gate` or IT2AGENT_FORCE=1.
@@ -26,6 +32,8 @@ import sys
 
 PROG = "it2agent-emit"
 FLAG_KEY = "agent.status_board"
+# ccstatus emits on the native OSC 21337 channel; it gates on its own flag.
+FLAG_KEY_NATIVE = "agent.native_status"
 DEFAULT_ATTENTION_MSG = "it2agent: agent needs attention"
 # Default badge interpolates the user vars set by `role`/`task`. iTerm2 forbids
 # `.` in a SetUserVar key (PTYSession.screenSetUserVar: rejects it) and prefixes
@@ -67,6 +75,12 @@ Commands:
                           colorblind-safe hex, or a raw RGB/RRGGBB hex.
   badge [format]          Set the session badge (SetBadgeFormat, base64'd).
                           Default: {DEFAULT_BADGE_FORMAT}
+  ccstatus <status>       Set the NATIVE tab status (OSC 21337) shown in
+    [--detail <text>]     iTerm2's tab status + Cockpit. <status> is a lifecycle
+                          keyword (busy, blocked, done, idle) — capitalized and
+                          given the matching lifecycle indicator color — or free
+                          text. --detail adds the optional detail line.
+  ccstatus clear          Clear the native tab status.
 
 Options:
   --no-gate               Bypass the feature-flag gate (local testing).
@@ -75,8 +89,9 @@ Options:
 Environment:
   IT2AGENT_FORCE=1       Bypass the feature-flag gate (local testing).
 
-Gating: emits only when the feature flag "{FLAG_KEY}" is ON (checked via the
-it2agent-flag helper). Otherwise emits nothing and exits 0.
+Gating: emits only when the governing feature flag is ON (checked via the
+it2agent-flag helper). Most commands gate on "{FLAG_KEY}"; ccstatus gates on
+"{FLAG_KEY_NATIVE}". Otherwise emits nothing and exits 0.
 """
     )
 
@@ -87,8 +102,11 @@ def die(msg):
     sys.exit(2)
 
 
-def gate_open(no_gate):
-    """Return True if the capability is enabled (or gating is bypassed)."""
+def gate_open(no_gate, flag_key):
+    """Return True if the capability is enabled (or gating is bypassed).
+
+    ``flag_key`` is the feature-flag key this command gates on.
+    """
     if os.environ.get("IT2AGENT_FORCE") == "1":
         return True
     if no_gate:
@@ -100,7 +118,7 @@ def gate_open(no_gate):
     # output so nothing but our escape sequence reaches our stdout.
     try:
         result = subprocess.run(
-            ["it2agent-flag", FLAG_KEY],
+            ["it2agent-flag", flag_key],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -111,6 +129,12 @@ def gate_open(no_gate):
 
 def b64(value):
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def esc21337(text):
+    """Escape text for a native OSC 21337 value: `\\` -> `\\\\`, then `;` ->
+    `\\;` (order matters). Matches VT100Terminal.m executeSetTabStatus."""
+    return text.replace("\\", "\\\\").replace(";", "\\;")
 
 
 def osc(body):
@@ -176,7 +200,48 @@ def build_sequence(cmd, args):
     if cmd == "badge":
         fmt = " ".join(args) if args else DEFAULT_BADGE_FORMAT
         return osc(f"1337;SetBadgeFormat={b64(fmt)}")
+    if cmd == "ccstatus":
+        return build_ccstatus(args)
     die(f"unknown command: {cmd} (try --help)")
+
+
+def build_ccstatus(args):
+    """Build the native OSC 21337 tab-status sequence."""
+    status_arg = None
+    detail = None
+    rest = list(args)
+    while rest:
+        a = rest.pop(0)
+        if a == "--detail":
+            if not rest:
+                die("ccstatus --detail requires a <text> value")
+            detail = rest.pop(0)
+        elif status_arg is None:
+            status_arg = a
+        else:
+            die("ccstatus takes exactly one <status> (or 'clear')")
+    if status_arg is None:
+        die("ccstatus requires a <status> (busy|blocked|done|idle|text) or 'clear'")
+    if status_arg == "clear":
+        if detail is not None:
+            die("ccstatus clear takes no --detail")
+        # Empty values clear each native key.
+        return osc("21337;status=;indicator=;detail=")
+    # Lifecycle keywords get a capitalized label + the matching lifecycle
+    # indicator hex (reusing the palette in STATUS_COLORS); anything else is
+    # free text with no indicator.
+    if status_arg in STATUS_COLORS:
+        label = status_arg.capitalize()
+        indicator = f"#{STATUS_COLORS[status_arg]}"
+    else:
+        label = esc21337(status_arg)
+        indicator = None
+    body = f"21337;status={label}"
+    if indicator is not None:
+        body += f";indicator={indicator}"
+    if detail is not None:
+        body += f";detail={esc21337(detail)}"
+    return osc(body)
 
 
 def main(argv):
@@ -211,7 +276,9 @@ def main(argv):
     # even when the capability is gated off.
     seq = build_sequence(cmd, rest)
 
-    if not gate_open(no_gate):
+    # ccstatus opts into the native OSC 21337 channel via its own flag.
+    flag_key = FLAG_KEY_NATIVE if cmd == "ccstatus" else FLAG_KEY
+    if not gate_open(no_gate, flag_key):
         return 0
 
     sys.stdout.write(seq)

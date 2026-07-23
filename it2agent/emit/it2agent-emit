@@ -16,13 +16,23 @@
 #   progress <st> <pct>  -> ESC ] 9 ; 4 ; <st> ; <pct> BEL   (ConEmu style)
 #   color <role|status>  -> ESC ] 1337 ; SetColors=tab=<RRGGBB> BEL
 #   badge [format]       -> ESC ] 1337 ; SetBadgeFormat=<base64(format)> BEL
+#   ccstatus <status>    -> ESC ] 21337 ; status=<TEXT> ; indicator=#<hex> BEL
 #
 # The tab-color key is `tab` (verified against iTerm2's it2setcolor utility and
 # the SetColors parser); iTerm2 has no `tabbg` key. The lifecycle palette is
 # colorblind-safe (Okabe-Ito); see it2agent/emit/docs/colors.md.
 #
-# Gating: every capability gates on its feature flag. This one gates on
-# `agent.status_board` via the external `it2agent-flag` helper (#11).
+# `ccstatus` cooperates with iTerm2's NATIVE tab-status channel (OSC 21337 —
+# the one that feeds the native tab status and the Cockpit / cc-status hook),
+# rather than the parallel SetUserVar board. OSC 21337 values are LITERAL (not
+# base64) semicolon-delimited key=value pairs; `;` and `\` are escaped as `\;`
+# and `\\`, and an empty value clears a key. See VT100Terminal.m
+# executeSetTabStatus + sources/Toolbelt/ToolStatus.swift.
+#
+# Gating: every capability gates on its feature flag. Most gate on
+# `agent.status_board`; `ccstatus` gates on the separate `agent.native_status`
+# so the native channel is opt-in independently of the parallel board. Both are
+# checked via the external `it2agent-flag` helper (#11).
 # If the flag is OFF/absent, or it2agent-flag is not on PATH, emit nothing and
 # exit 0 quietly (fail-safe: capabilities are off by default). Bypass for local
 # testing with `--no-gate` or the env override IT2AGENT_FORCE=1.
@@ -34,6 +44,8 @@ set -eu
 
 PROG="it2agent-emit"
 FLAG_KEY="agent.status_board"
+# ccstatus emits on the native OSC 21337 channel; it gates on its own flag.
+FLAG_KEY_NATIVE="agent.native_status"
 DEFAULT_ATTENTION_MSG="it2agent: agent needs attention"
 # Default badge interpolates the user vars set by `role`/`task`. iTerm2 forbids
 # `.` in a SetUserVar key (PTYSession.screenSetUserVar: rejects it) and prefixes
@@ -62,6 +74,12 @@ Commands:
                           colorblind-safe hex, or a raw RGB/RRGGBB hex.
   badge [format]          Set the session badge (SetBadgeFormat, base64'd).
                           Default: $DEFAULT_BADGE_FORMAT
+  ccstatus <status>       Set the NATIVE tab status (OSC 21337) shown in
+    [--detail <text>]     iTerm2's tab status + Cockpit. <status> is a lifecycle
+                          keyword (busy, blocked, done, idle) — capitalized and
+                          given the matching lifecycle indicator color — or free
+                          text. --detail adds the optional detail line.
+  ccstatus clear          Clear the native tab status.
 
 Options:
   --no-gate               Bypass the feature-flag gate (local testing).
@@ -70,8 +88,9 @@ Options:
 Environment:
   IT2AGENT_FORCE=1       Bypass the feature-flag gate (local testing).
 
-Gating: emits only when the feature flag "$FLAG_KEY" is ON (checked via the
-it2agent-flag helper). Otherwise emits nothing and exits 0.
+Gating: emits only when the governing feature flag is ON (checked via the
+it2agent-flag helper). Most commands gate on "$FLAG_KEY"; ccstatus gates on
+"$FLAG_KEY_NATIVE". Otherwise emits nothing and exits 0.
 EOF
 }
 
@@ -82,6 +101,7 @@ die() {
 }
 
 # Returns 0 if the capability is enabled (or gating is bypassed), else 1.
+# $1 = the feature-flag key this command gates on.
 gate_open() {
 	if [ "${IT2AGENT_FORCE:-}" = "1" ]; then
 		return 0
@@ -95,7 +115,7 @@ gate_open() {
 	fi
 	# it2agent-flag prints 1/exit0 when ON, 0/exit1 when OFF. Swallow its
 	# stdout so nothing but our escape sequence ever reaches our stdout.
-	if it2agent-flag "$FLAG_KEY" >/dev/null 2>&1; then
+	if it2agent-flag "$1" >/dev/null 2>&1; then
 		return 0
 	fi
 	return 1
@@ -104,6 +124,12 @@ gate_open() {
 b64() {
 	# Standard base64, single line (Linux `base64` wraps at 76 cols).
 	printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+# Escape text for a native OSC 21337 value: `\` -> `\\`, then `;` -> `\;`
+# (order matters). Matches VT100Terminal.m executeSetTabStatus' parser.
+esc21337() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/;/\\;/g'
 }
 
 # Wrap a body in OSC ... BEL and write raw bytes to stdout. The body is passed
@@ -179,6 +205,9 @@ shift
 # --- validate args & build the sequence BEFORE consulting the gate -----------
 # (Bad input is a usage error even when gated off, so validate first.)
 seq=""
+# The flag this command gates on. Most use the status board; ccstatus opts into
+# the native OSC 21337 channel via its own flag.
+flag="$FLAG_KEY"
 case "$cmd" in
 	status | role | task)
 		[ $# -eq 1 ] || die "$cmd requires exactly one <value> argument"
@@ -221,13 +250,64 @@ case "$cmd" in
 		fi
 		seq="$(osc "1337;SetBadgeFormat=$(b64 "$fmt")")"
 		;;
+	ccstatus)
+		flag="$FLAG_KEY_NATIVE"
+		# Parse: <status> plus optional --detail <text>, or the literal `clear`.
+		status_arg=""
+		have_status=0
+		detail=""
+		have_detail=0
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--detail)
+					[ $# -ge 2 ] || die "ccstatus --detail requires a <text> value"
+					detail="$2"
+					have_detail=1
+					shift 2
+					;;
+				*)
+					[ "$have_status" -eq 0 ] || die "ccstatus takes exactly one <status> (or 'clear')"
+					status_arg="$1"
+					have_status=1
+					shift
+					;;
+			esac
+		done
+		[ "$have_status" -eq 1 ] || die "ccstatus requires a <status> (busy|blocked|done|idle|text) or 'clear'"
+		if [ "$status_arg" = "clear" ]; then
+			[ "$have_detail" -eq 0 ] || die "ccstatus clear takes no --detail"
+			# Empty values clear each native key.
+			seq="$(osc '21337;status=;indicator=;detail=')"
+		else
+			# Lifecycle keywords get a capitalized label + the matching
+			# lifecycle indicator hex (reusing the palette in color_for);
+			# anything else is free text with no indicator.
+			ind=""
+			case "$status_arg" in
+				busy)    label="Busy" ;;
+				blocked) label="Blocked" ;;
+				done)    label="Done" ;;
+				idle)    label="Idle" ;;
+				*)       label="" ;;
+			esac
+			if [ -n "$label" ]; then
+				ind="#$(color_for "$status_arg")"
+			else
+				label="$(esc21337 "$status_arg")"
+			fi
+			body="21337;status=$label"
+			[ -n "$ind" ] && body="$body;indicator=$ind"
+			[ "$have_detail" -eq 1 ] && body="$body;detail=$(esc21337 "$detail")"
+			seq="$(osc "$body")"
+		fi
+		;;
 	*)
 		die "unknown command: $cmd (try --help)"
 		;;
 esac
 
 # --- gate, then emit ----------------------------------------------------------
-if ! gate_open; then
+if ! gate_open "$flag"; then
 	exit 0
 fi
 
