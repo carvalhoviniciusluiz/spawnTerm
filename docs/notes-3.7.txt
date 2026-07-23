@@ -35,6 +35,16 @@ Major New Features:
   source of truth. If it2agent-flag cannot be
   found the checkboxes are shown disabled.
 
+- The “Team Bridge” agent capability now
+  installs a Claude Code hook when you check
+  it. It targets the active terminal's git
+  project, writing to the machine-local,
+  gitignored .claude/settings.local.json, and
+  unchecking removes only our entries. A label
+  shows the resolved file. You still enable
+  CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+  yourself.
+
 - A new agent capability, "Claude Code
   Status Bar", adds an opt-in status-bar
   component that aggregates Claude Code session
