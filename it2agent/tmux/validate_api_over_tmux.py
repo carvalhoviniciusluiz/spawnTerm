@@ -38,7 +38,12 @@ USAGE (on a Mac, in iTerm2, with the Python API enabled)
          it2agent/tmux/it2agent-tmux spawn --no-gate --role probe --task api -- $SHELL
      (or plainly:  tmux -CC new-session -A -s st-probe )
   4. Run this harness from another shell:
-         python3 it2agent/tmux/validate_api_over_tmux.py --session st-probe
+         python3 it2agent/tmux/validate_api_over_tmux.py --session <substring>
+     NOTE: --session matches the iTerm2 session NAME, which under tmux -CC is the
+     worktree path (e.g. a slice of `probe-ac6-afd7e7`), NOT the tmux session name
+     `st-probe`. If the substring matches nothing the harness now FAILS LOUDLY and
+     lists the available names, rather than silently probing the current session
+     and reporting a FALSE PASS (#82). Omit --session to probe the current session.
   5. Read the PASS/FAIL table and paste it into the tmux README's findings.
 
 It changes nothing durable: it sets one temp user var and emits one custom escape
@@ -60,6 +65,48 @@ MARKER = f"stprobe{int(time.time())}"
 TEMP_VAR = "user.it2agent_tmux_probe"
 
 
+class NoSessionMatchError(Exception):
+    """Raised when an explicitly requested --session substring matches no session.
+
+    Carries the requested substring and the list of available session names so the
+    caller can print a clear, actionable error instead of silently measuring the
+    wrong session (a FALSE PASS — see #82).
+    """
+
+    def __init__(self, substring: str, available: list[str]) -> None:
+        self.substring = substring
+        self.available = available
+        super().__init__(
+            f"no iTerm2 session matched '{substring}'"
+        )
+
+
+def _find_matching_session_index(names: list[str], substring: str) -> int | None:
+    """Return the index of the first session name that contains `substring`
+    (case-insensitive), or None if none match. Pure; unit-tested."""
+    needle = substring.lower()
+    for index, name in enumerate(names):
+        if needle in (name or "").lower():
+            return index
+    return None
+
+
+def resolve_session_choice(names: list[str], substring: str, explicit: bool) -> int | None:
+    """Decide which session to probe. Pure; unit-tested.
+
+    Returns the index of the matched session, or None meaning "fall back to the
+    current session". When `explicit` is True (the operator passed --session) and
+    nothing matches, raises NoSessionMatchError instead of falling back, so the
+    harness fails loudly rather than measuring the wrong session (#82).
+    """
+    index = _find_matching_session_index(names, substring)
+    if index is not None:
+        return index
+    if explicit:
+        raise NoSessionMatchError(substring, names)
+    return None
+
+
 def _fail_no_iterm2(exc: Exception) -> int:
     print("VALIDATION COULD NOT RUN — this needs a LIVE iTerm2 + Python API.", file=sys.stderr)
     print(f"  reason: {exc}", file=sys.stderr)
@@ -70,27 +117,51 @@ def _fail_no_iterm2(exc: Exception) -> int:
     return 3
 
 
-async def _run(connection, session_substring: str) -> int:
+async def _run(connection, session_substring: str, explicit: bool) -> int:
     import iterm2
 
     results: dict[str, str] = {}
 
     app = await iterm2.async_get_app(connection)
 
-    # Find a session whose name/tty/id hints it is our tmux-CC probe. We match
-    # loosely because the operator names the tmux session, not the iTerm2 one.
-    target = None
+    # Enumerate every session with its iTerm2 name. We match loosely (substring)
+    # because the operator names the tmux session, not the iTerm2 one.
+    sessions = []
+    names: list[str] = []
     for window in app.terminal_windows:
         for tab in window.tabs:
             for session in tab.sessions:
                 name = await session.async_get_variable("name") or ""
-                if session_substring.lower() in name.lower():
-                    target = session
-                    break
-    if target is None:
-        # Fall back to the current session so the harness still measures the API.
+                sessions.append(session)
+                names.append(name)
+
+    # Pick the target. If --session was passed explicitly and matches nothing,
+    # fail loudly instead of silently probing the current session (a FALSE PASS,
+    # see #82) — the default current-session fallback is kept ONLY when no
+    # --session was given at all.
+    try:
+        index = resolve_session_choice(names, session_substring, explicit)
+    except NoSessionMatchError as exc:
+        print(f"ERROR: --session '{exc.substring}' matched no iTerm2 session.", file=sys.stderr)
+        if exc.available:
+            print("  available session names:", file=sys.stderr)
+            for name in exc.available:
+                print(f"    - {name!r}", file=sys.stderr)
+        else:
+            print("  (no iTerm2 sessions were found at all)", file=sys.stderr)
+        print("  Note: under tmux -CC the integrated iTerm2 session is named after the", file=sys.stderr)
+        print("  worktree path, NOT the tmux session name (e.g. 'st-<id>'). Pass a", file=sys.stderr)
+        print("  substring of the iTerm2 name shown above, or omit --session to probe", file=sys.stderr)
+        print("  the current session. Refusing to fall back and report a FALSE PASS.", file=sys.stderr)
+        return 4
+
+    if index is None:
+        # No --session given: fall back to the current session so the harness
+        # still measures the API against whatever is focused.
         target = app.current_terminal_window.current_tab.current_session
-        print(f"note: no session matched '{session_substring}'; using the current session.")
+        print("note: no --session given; using the current session.")
+    else:
+        target = sessions[index]
 
     # (5) set + get a user var.
     try:
@@ -164,8 +235,19 @@ async def _run(connection, session_substring: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate the iTerm2 Python API over tmux -CC (needs a live run).")
-    parser.add_argument("--session", default="st-", help="substring of the tmux-CC session's iTerm2 name to probe (default: st-)")
+    parser.add_argument(
+        "--session",
+        default=None,
+        help="substring of the tmux-CC session's iTerm2 name to probe. If given and it "
+             "matches no session, the harness FAILS (it does not fall back). If omitted, "
+             "the current session is probed (default substring: st-).",
+    )
     args = parser.parse_args()
+
+    # Distinguish "operator explicitly asked for a session" from "no flag at all".
+    # Only the latter is allowed to fall back to the current session (#82).
+    explicit = args.session is not None
+    session_substring = args.session if explicit else "st-"
 
     try:
         import iterm2  # noqa: F401
@@ -178,7 +260,7 @@ def main() -> int:
         rc_holder: dict[str, int] = {}
 
         async def _main(connection):
-            rc_holder["rc"] = await _run(connection, args.session)
+            rc_holder["rc"] = await _run(connection, session_substring, explicit)
 
         iterm2.run_until_complete(_main)
         return rc_holder.get("rc", 2)
