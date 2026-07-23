@@ -194,6 +194,43 @@ case "$as_only" in
 esac
 
 echo
+echo "--- 6e. native tab-status (ccstatus) wiring (#89) ---"
+# The boot script always includes an it2agent-emit ccstatus line AFTER the
+# identity emits. It self-gates on agent.native_status inside it2agent-emit, so
+# it is a no-op when that flag is OFF — hence it is present in the plan
+# regardless of flag state. <status> mirrors --status; --detail mirrors the
+# badge's role · task composition.
+cc_out="$(sh "$SPAWN" --role tech-lead --task 'build #10' --status busy --dry-run -- claude)"
+assert_contains "ccstatus line present with status + role · task detail" \
+	"$EMIT' ccstatus 'busy' --detail 'tech-lead · build #10'" "$cc_out"
+# It comes AFTER the identity emits (badge precedes ccstatus in the boot script).
+cc_order="$(printf '%s\n' "$cc_out" | grep -n "it2agent-emit' \(badge\|ccstatus\)")"
+badge_ln="$(printf '%s\n' "$cc_order" | sed -n 's/^\([0-9]*\):.*badge.*/\1/p' | head -1)"
+ccst_ln="$(printf '%s\n' "$cc_order" | sed -n 's/^\([0-9]*\):.*ccstatus.*/\1/p' | head -1)"
+if [ -n "$badge_ln" ] && [ -n "$ccst_ln" ] && [ "$ccst_ln" -gt "$badge_ln" ]; then
+	green "ccstatus emitted AFTER the identity emits (badge before ccstatus)"
+else
+	red "ccstatus not ordered after the identity emits (badge=$badge_ln ccstatus=$ccst_ln)"
+fi
+# <status> tracks --status.
+cc_idle="$(sh "$SPAWN" --role r --task t --status idle --dry-run -- true)"
+assert_contains "ccstatus status tracks --status (idle)" "ccstatus 'idle' --detail 'r · t'" "$cc_idle"
+# --no-gate is forwarded to the ccstatus emit like the others.
+cc_nogate="$(sh "$SPAWN" --role r --task t --no-gate --dry-run -- true)"
+assert_contains "--no-gate forwarded to ccstatus" "$EMIT' --no-gate ccstatus 'busy' --detail 'r · t'" "$cc_nogate"
+# Fallbacks mirror the badge: role-only, task-only, and both-empty (omit --detail).
+cc_roleonly="$(sh "$SPAWN" --role solo --dry-run -- true)"
+assert_contains "role-only detail is just the role" "ccstatus 'busy' --detail 'solo'" "$cc_roleonly"
+cc_taskonly="$(sh "$SPAWN" --task lonely --dry-run -- true)"
+assert_contains "task-only detail is just the task" "ccstatus 'busy' --detail 'lonely'" "$cc_taskonly"
+cc_none="$(sh "$SPAWN" --dry-run -- true)"
+assert_contains "no role/task still emits ccstatus (status only)" "ccstatus 'busy'" "$cc_none"
+case "$cc_none" in
+	*"ccstatus 'busy' --detail"*) red "ccstatus should omit --detail when role and task are both empty" ;;
+	*)                            green "ccstatus omits --detail when role and task are both empty" ;;
+esac
+
+echo
 echo "--- 6. generated AppleScript parses ---"
 if command -v osacompile >/dev/null 2>&1; then
 	AS_FILE="$(mktemp).applescript"

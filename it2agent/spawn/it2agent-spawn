@@ -410,6 +410,28 @@ add_emit "status $(shq "$STATUS")"
 add_emit "color $(shq "$STATUS")"
 add_emit "badge"
 
+# NATIVE tab status (OSC 21337) — cooperate with iTerm2's native tab-status /
+# Cockpit channel (#89, follow-up to #87/#88). We ALWAYS append this line; it is
+# NOT gated here. it2agent-emit ccstatus SELF-GATES on agent.native_status, so
+# when that flag is OFF (the default) the call emits nothing and exits 0 — a
+# no-op that leaves the current behavior unchanged. The detail mirrors the
+# badge's own role/task composition (role · task, else whichever is set); when
+# both are empty we omit --detail. --no-gate rides through via GATE_ARG exactly
+# like the identity emits above.
+CCSTATUS_DETAIL=""
+if [ -n "$ROLE" ] && [ -n "$TASK" ]; then
+	CCSTATUS_DETAIL="$ROLE · $TASK"
+elif [ -n "$ROLE" ]; then
+	CCSTATUS_DETAIL="$ROLE"
+elif [ -n "$TASK" ]; then
+	CCSTATUS_DETAIL="$TASK"
+fi
+if [ -n "$CCSTATUS_DETAIL" ]; then
+	add_emit "ccstatus $(shq "$STATUS") --detail $(shq "$CCSTATUS_DETAIL")"
+else
+	add_emit "ccstatus $(shq "$STATUS")"
+fi
+
 # 3) capability-guide header (#56). A SHORT (1-line) pointer to the consolidated
 #    guide is printed into the new session AFTER the identity emits, so a fresh
 #    agent learns the capabilities exist. It does NOT dump the guide — it points

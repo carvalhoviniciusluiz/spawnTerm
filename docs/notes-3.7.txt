@@ -65,6 +65,13 @@ Major New Features:
   AI > AI Agents. Adapted from
   gnachman/iTerm2#673.
 
+- When the "native tab status" agent
+  capability is on, tabs opened by the
+  it2agent spawn and tmux wrappers now light
+  up iTerm2's native tab status (and Cockpit)
+  from birth, stamped with the agent's status
+  and role · task. Off by default.
+
 - The Companion app can now receive push
   notifications for terminal alerts. Turn on
   "Send alerts to paired iPhone" in a profile's

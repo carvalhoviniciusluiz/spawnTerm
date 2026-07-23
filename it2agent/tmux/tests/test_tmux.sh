@@ -122,6 +122,41 @@ assert_contains "boot script self-removes before exec" "rm -f /tmp/it2agent-tmux
 assert_contains "boot script exec's command"          "exec 'claude'"                 "$inner"
 
 echo
+echo "--- 4b. native tab-status (ccstatus) wiring (#89) ---"
+# The boot script always includes an it2agent-emit ccstatus line AFTER the
+# identity emits. It self-gates on agent.native_status inside it2agent-emit, so
+# it is present in the plan regardless of flag state (no-op at runtime when the
+# flag is OFF). <status> mirrors --status; --detail mirrors the badge's role ·
+# task composition. (agent.tmux is still ON from section 3.)
+cc_on="$(sh "$TMUX_BIN" spawn --role worker --task 'build #5' --status busy --dry-run -- claude --resume)"
+assert_contains "ccstatus line present with status + role · task detail" \
+	"ccstatus 'busy' --detail 'worker · build #5'" "$cc_on"
+# It comes AFTER the identity emits (badge precedes ccstatus in the ;-joined boot).
+cc_inner="$(printf '%s\n' "$cc_on" | awk '/boot script/{getline; print; exit}')"
+case "$cc_inner" in
+	*"badge ; "*"ccstatus 'busy'"*) green "ccstatus emitted AFTER the identity emits (badge before ccstatus)" ;;
+	*)                              red "ccstatus not ordered after badge in the boot script" ;;
+esac
+# <status> tracks --status.
+cc_idle="$(sh "$TMUX_BIN" spawn --role r --task t --status idle --dry-run -- claude)"
+assert_contains "ccstatus status tracks --status (idle)" "ccstatus 'idle' --detail 'r · t'" "$cc_idle"
+# --no-gate is forwarded to the ccstatus emit like the others. The tmux boot
+# quotes the emit path, so the on-wire form is '<emit>' --no-gate ccstatus ...
+assert_contains "--no-gate forwarded to ccstatus" "$EMIT' --no-gate ccstatus 'busy' --detail 'worker · build #5'" \
+	"$(sh "$TMUX_BIN" spawn --role worker --task 'build #5' --no-gate --dry-run -- claude)"
+# Fallbacks mirror the badge: role-only, task-only, both-empty (omit --detail).
+assert_contains "role-only detail is just the role" "ccstatus 'busy' --detail 'solo'" \
+	"$(sh "$TMUX_BIN" spawn --role solo --dry-run -- claude)"
+assert_contains "task-only detail is just the task" "ccstatus 'busy' --detail 'lonely'" \
+	"$(sh "$TMUX_BIN" spawn --task lonely --dry-run -- claude)"
+cc_none="$(sh "$TMUX_BIN" spawn --session solo --dry-run -- claude)"
+assert_contains "no role/task still emits ccstatus (status only)" "ccstatus 'busy'" "$cc_none"
+case "$cc_none" in
+	*"ccstatus 'busy' --detail"*) red "ccstatus should omit --detail when role and task are both empty" ;;
+	*)                            green "ccstatus omits --detail when role and task are both empty" ;;
+esac
+
+echo
 echo "--- 5. emitted tmux argv round-trips: -lc payload is a SINGLE arg ---"
 # Eval the printed `tmux -CC ...` line with `tmux` shimmed to a shell function
 # that records its arg count. Correct quoting => tmux sees exactly 8 args:
