@@ -94,13 +94,38 @@ Let `HASH = sha1("<canonical-repo-path>|<agent-id>")` (hex).
 Re-spawning the **same agent id** re-derives the **same** branch/port/namespace,
 so `create` is idempotent (it reuses an existing worktree).
 
-### Port allocation & probing
+### Port allocation, probing & the lease
 
 `plan` / `env` and any `--dry-run` report the **deterministic** candidate port
-(reproducible on any machine). The real `create` then **probes** upward from the
-candidate — wrapping within `[base, base+span)` — for a free TCP port (via
-`lsof`/`nc` when available), so two agents that hash to the same port still end
-up on different ports. Pass `--no-probe` to force the deterministic port as-is.
+(reproducible on any machine). The real `create` then allocates upward from the
+candidate — wrapping within `[base, base+span)` — for a port that is neither a
+live TCP listener (via `lsof`/`nc` when available) nor already **leased**, so two
+agents that hash to the same port still end up on different ports. Pass
+`--no-probe` to force the deterministic port as-is (and skip leasing).
+
+**Why the lease.** The `lsof`/`nc` probe alone is a check-then-use: two agents
+spawned near-simultaneously can both observe the same port as free and both bind
+it (a TOCTOU race). `create` closes that gap by claiming its chosen port with a
+**persisted lease** under an allocation mutex (`flock` where available, else an
+atomic `mkdir` lock — the fallback used on macOS, which has no `flock`). The
+check-and-claim is therefore atomic across concurrent spawns of the same repo.
+
+- **Where.** Lease files live in `$IT2AGENT_WORKTREE_ROOT/.leases/` (default
+  `<parent-of-repo>/.it2agent-worktrees/<repo>/.leases/`) — beside the per-repo
+  worktrees, so every concurrent spawn of the repo shares one lease dir and
+  `cleanup` (and a future janitor) can see them. Created lazily by `create`;
+  never by the pure `plan`/`env`.
+- **Contents.** `<port>.lease` records `id`, `repo`, `pid`, `epoch`, and
+  `worktree` (key=value lines).
+- **Stale reclaim.** A lease is reclaimed (deleted + its port reused) when its
+  `worktree` path no longer exists, **or** it records a positive owner `pid` that
+  is no longer alive. `pid=0` (the default) means "tied to the worktree only",
+  since `create` is itself ephemeral; pass `--lease-pid <n>` to bind a lease to a
+  durable process for tighter reclaim. Reclaim runs during allocation, so leases
+  never leak permanently even if `cleanup` is skipped.
+- **Release.** `cleanup` releases every lease whose `worktree` matches the one it
+  removes (matching on identity, since the claimed port may have advanced past
+  the deterministic candidate). This is where an explicit teardown hooks in.
 
 ## `create` / `cleanup` (the side-effect layer)
 

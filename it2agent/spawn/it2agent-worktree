@@ -209,6 +209,13 @@ compute_plan() {
 	fi
 	WORKTREE="$(canon_existing "$wt_root/$leaf")"
 
+	# Lease dir sits beside the per-repo worktrees and is shared by every
+	# concurrent spawn of this repo. Canonicalized like WORKTREE so independent
+	# processes agree on the path. Computed here (pure) but only CREATED by the
+	# side-effecting allocation path, so plan/env stay side-effect-free.
+	WT_ROOT="$wt_root"
+	LEASES_DIR="$(canon_existing "$wt_root/.leases")"
+
 	# port int from first 7 hex chars (fits signed 32-bit shell arithmetic).
 	port_hex="$(printf '%s' "$HASH" | cut -c1-7)"
 	port_off=$(( 0x$port_hex % SPAN ))
@@ -240,10 +247,14 @@ resolve_repo() {
 }
 
 # --- free-port probing (side-effect layer) -----------------------------------
-# Deterministic candidate first; if taken, walk upward within the range,
-# wrapping, until a free TCP port is found or the range is exhausted.
+# Deterministic candidate first; if taken (by a live TCP listener OR a live
+# lease), walk upward within the range, wrapping, until a free port is found or
+# the range is exhausted. See "port lease" below for the TOCTOU fix.
 port_in_use() {
 	p="$1"
+	# Test/CI seam: pretend every port is TCP-free so lease logic can be
+	# exercised deterministically regardless of what the host happens to bind.
+	[ "${IT2AGENT_NO_TCP_PROBE:-}" = "1" ] && return 1
 	# Best-effort, portable-ish. Prefer lsof; fall back to nc; else assume free.
 	if command -v lsof >/dev/null 2>&1; then
 		lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && return 0 || return 1
@@ -253,23 +264,149 @@ port_in_use() {
 	return 1
 }
 
-probe_free_port() {
-	# Starting at $PORT, find a free port within [BASE_PORT, BASE_PORT+SPAN).
+# --- port lease (closes the TOCTOU gap in the probe) -------------------------
+# The bare probe above is a check-then-use: two agents spawned near-simultaneously
+# can both observe the same port as free and both bind it. A persisted lease under
+# an allocation mutex makes the check-and-claim atomic across concurrent spawns.
+#
+# Storage: <LEASES_DIR>/<port>.lease, where LEASES_DIR = "$WT_ROOT/.leases"
+# (alongside the per-repo worktrees, so `cleanup` and a future janitor can see
+# it, and every concurrent spawn of the same repo shares one lease dir). Each
+# lease is a small key=value record:
+#     id=<agent-id>  repo=<repo-root>  pid=<owner-pid|0>  epoch=<unix-secs>  worktree=<path>
+# A lease is STALE (reclaimable) when its worktree path no longer exists, OR it
+# records a positive owner pid that is no longer alive. `pid=0` means "no live-pid
+# tracking" (the default, since `create` itself is ephemeral) — such a lease is
+# tied to its worktree only. Pass --lease-pid <n> to bind a lease to a durable
+# process for tighter reclaim.
+
+pid_alive() {
+	# $1 = pid. 0 (true) iff it names a live process.
+	case "$1" in
+		'' | 0 | *[!0-9]*) return 1 ;;
+	esac
+	kill -0 "$1" 2>/dev/null
+}
+
+lease_path() {
+	printf '%s/%s.lease' "$LEASES_DIR" "$1"
+}
+
+# lease_stale <lease-file>: 0 (true) if the lease is absent or reclaimable.
+lease_stale() {
+	lf="$1"
+	[ -f "$lf" ] || return 0
+	l_pid="$(sed -n 's/^pid=//p' "$lf" 2>/dev/null | head -1)"
+	l_wt="$(sed -n 's/^worktree=//p' "$lf" 2>/dev/null | head -1)"
+	# Worktree gone => stale.
+	if [ -n "$l_wt" ] && [ ! -d "$l_wt" ]; then
+		return 0
+	fi
+	# Positive owner pid that is dead => stale.
+	if [ -n "$l_pid" ] && [ "$l_pid" != "0" ] && ! pid_alive "$l_pid"; then
+		return 0
+	fi
+	return 1
+}
+
+write_lease() {
+	# $1 = port. Writes/overwrites this agent's claim.
+	lf="$(lease_path "$1")"
+	epoch="$(date +%s 2>/dev/null || echo 0)"
+	{
+		printf 'id=%s\n' "$AGENT_ID"
+		printf 'repo=%s\n' "$REPO_ROOT"
+		printf 'pid=%s\n' "$LEASE_PID"
+		printf 'epoch=%s\n' "$epoch"
+		printf 'worktree=%s\n' "$WORKTREE"
+	} > "$lf"
+}
+
+# --- allocation mutex: flock when available, atomic mkdir as POSIX fallback ---
+LOCK_MODE=""
+LOCK_DIR=""
+acquire_alloc_lock() {
+	mkdir -p "$LEASES_DIR" 2>/dev/null || die "cannot create leases dir: $LEASES_DIR"
+	if command -v flock >/dev/null 2>&1; then
+		LOCK_MODE="flock"
+		# shellcheck disable=SC2093
+		exec 9>"$LEASES_DIR/.alloc.lock" || die "cannot open allocation lock"
+		flock 9 || die "cannot acquire allocation lock"
+		return 0
+	fi
+	LOCK_MODE="mkdir"
+	LOCK_DIR="$LEASES_DIR/.alloc.lock.d"
+	tries=0
+	while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+		# Reclaim a lock whose holder died (crash-safe, no sleep).
+		holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+		if [ -n "$holder" ] && ! pid_alive "$holder"; then
+			rm -rf "$LOCK_DIR" 2>/dev/null || true
+			continue
+		fi
+		tries=$(( tries + 1 ))
+		if [ "$tries" -ge 100000 ]; then
+			die "cannot acquire allocation lock (held by pid ${holder:-?})"
+		fi
+	done
+	printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+}
+
+release_alloc_lock() {
+	case "$LOCK_MODE" in
+		flock) exec 9>&- 2>/dev/null || true ;;
+		mkdir) [ -n "$LOCK_DIR" ] && rm -rf "$LOCK_DIR" 2>/dev/null || true ;;
+	esac
+	LOCK_MODE=""
+}
+
+# lease_free_port: under the allocation mutex, start at the deterministic $PORT
+# and walk upward within [BASE_PORT, BASE_PORT+SPAN), wrapping. The first port
+# that is neither live-leased nor a live TCP listener is claimed with a lease and
+# assigned to $PORT. Stale leases encountered on the way are reclaimed. With no
+# contention this returns the deterministic candidate unchanged (back-compat).
+lease_free_port() {
+	acquire_alloc_lock
 	start="$PORT"
 	i=0
 	cand="$start"
 	while [ "$i" -lt "$SPAN" ]; do
-		if ! port_in_use "$cand"; then
-			PORT="$cand"
-			return 0
+		lf="$(lease_path "$cand")"
+		if lease_stale "$lf"; then
+			# Absent or reclaimable: drop any stale file, then require the port
+			# to also be free of a live TCP listener before claiming it.
+			[ -f "$lf" ] && rm -f "$lf" 2>/dev/null || true
+			if ! port_in_use "$cand"; then
+				PORT="$cand"
+				write_lease "$cand"
+				release_alloc_lock
+				return 0
+			fi
 		fi
 		i=$(( i + 1 ))
 		off=$(( (cand - BASE_PORT + 1) % SPAN ))
 		cand=$(( BASE_PORT + off ))
 	done
-	warn "no free port in range ${BASE_PORT}..$(( BASE_PORT + SPAN - 1 )); using deterministic candidate $start"
+	release_alloc_lock
+	warn "no free/unleased port in range ${BASE_PORT}..$(( BASE_PORT + SPAN - 1 )); using deterministic candidate $start"
 	PORT="$start"
 	return 0
+}
+
+# release_leases_for_worktree: drop every lease this repo owns whose worktree
+# matches $WORKTREE (the actually-claimed port may have advanced past the
+# deterministic candidate, so we match on identity, not on the derived port).
+release_leases_for_worktree() {
+	[ -d "$LEASES_DIR" ] || return 0
+	acquire_alloc_lock
+	for lf in "$LEASES_DIR"/*.lease; do
+		[ -f "$lf" ] || continue
+		l_wt="$(sed -n 's/^worktree=//p' "$lf" 2>/dev/null | head -1)"
+		if [ "$l_wt" = "$WORKTREE" ]; then
+			rm -f "$lf" 2>/dev/null || true
+		fi
+	done
+	release_alloc_lock
 }
 
 # --- git plan runner ---------------------------------------------------------
@@ -289,10 +426,12 @@ run_git() {
 cmd_create() {
 	compute_plan
 
-	# Probe for a free port only when actually creating (not in dry-run, so the
-	# printed plan stays deterministic and reproducible on any machine).
+	# Claim a free port under the allocation lease only when actually creating
+	# (not in dry-run, so the printed plan stays deterministic and reproducible
+	# on any machine). --no-probe forces the deterministic port as-is with no
+	# lease (back-compat: the value is exactly the pure plan's).
 	if [ "$DRYRUN" != "1" ] && [ "$NO_PROBE" != "1" ]; then
-		probe_free_port
+		lease_free_port
 	fi
 
 	# Emit the allocation FIRST so callers can capture values regardless of what
@@ -301,6 +440,7 @@ cmd_create() {
 
 	if [ "$DRYRUN" = "1" ]; then
 		printf 'would-run: mkdir -p %s\n' "$(dirname "$WORKTREE")"
+		[ "$NO_PROBE" != "1" ] && printf 'would-run: lease port under %s (advancing on conflict)\n' "$LEASES_DIR"
 	else
 		mkdir -p "$(dirname "$WORKTREE")" || die "cannot create worktree parent: $(dirname "$WORKTREE")"
 	fi
@@ -360,6 +500,7 @@ cmd_cleanup() {
 		printf 'would-run: git -C %s worktree remove %s\n' "$REPO_ROOT" "$WORKTREE"
 		printf 'would-run: git -C %s branch -d %s\n' "$REPO_ROOT" "$BRANCH"
 		printf 'would-run: git -C %s worktree prune\n' "$REPO_ROOT"
+		printf 'would-run: release port lease(s) for %s under %s\n' "$WORKTREE" "$LEASES_DIR"
 		return 0
 	fi
 
@@ -377,6 +518,8 @@ cmd_cleanup() {
 	if [ "$wt_registered" = "0" ] && [ "$branch_exists" = "0" ]; then
 		warn "nothing to clean: no worktree at $WORKTREE and no branch $BRANCH"
 		git -C "$REPO_ROOT" worktree prune >&2 2>/dev/null || true
+		# Still release any lingering lease so a removed worktree never leaks one.
+		release_leases_for_worktree
 		return 0
 	fi
 
@@ -429,6 +572,8 @@ cmd_cleanup() {
 		fi
 	fi
 	git -C "$REPO_ROOT" worktree prune >&2 2>/dev/null || true
+	# Release the port lease(s) this worktree held so the port returns to the pool.
+	release_leases_for_worktree
 	warn "removed worktree $WORKTREE and branch $BRANCH"
 }
 
@@ -472,7 +617,11 @@ Common options:
 
 create options:
   --dry-run          Print the git commands + allocation; execute nothing.
-  --no-probe         Skip free-port probing; use the deterministic port as-is.
+  --no-probe         Skip free-port probing AND leasing; use the deterministic
+                     port as-is (back-compat; identical to the pure plan).
+  --lease-pid <n>    Bind the port lease to a durable process pid so it is
+                     reclaimed when that process dies (default 0 = the lease is
+                     tied to the worktree only).
   --no-gate          Bypass the feature-flag gate (local testing).
 
 cleanup options:
@@ -515,6 +664,7 @@ NO_GATE=0
 NO_PROBE=0
 FORCE=0
 BASE_REF=""
+LEASE_PID=0
 
 [ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
 
@@ -537,6 +687,8 @@ while [ $# -gt 0 ]; do
 		--dry-run) DRYRUN=1; shift ;;
 		--no-gate) NO_GATE=1; shift ;;
 		--no-probe) NO_PROBE=1; shift ;;
+		--lease-pid) [ $# -ge 2 ] || die "--lease-pid requires a value"; LEASE_PID="$2"; shift 2 ;;
+		--lease-pid=*) LEASE_PID="${1#--lease-pid=}"; shift ;;
 		--force) FORCE=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		--) shift; break ;;
@@ -544,6 +696,8 @@ while [ $# -gt 0 ]; do
 		*) die "unexpected argument: $1 (try --help)" ;;
 	esac
 done
+
+is_uint "$LEASE_PID" || die "--lease-pid must be a non-negative integer"
 
 resolve_repo "$REPO_ARG"
 

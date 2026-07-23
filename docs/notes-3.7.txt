@@ -82,6 +82,16 @@ Major New Features:
   from birth, stamped with the agent's status
   and role · task. Off by default.
 
+- When the "worktree isolation" agent
+  capability is on, the per-agent port each
+  spawned worktree gets is now claimed with a
+  persisted lease under a lock, closing a race
+  where two agents spawned at once could both
+  grab the same port. A leased or busy port
+  advances to the next free one; stale leases
+  (dead owner or missing worktree) are
+  reclaimed, and cleanup releases them.
+
 - A new agent capability, "Team Bridge",
   durably mirrors Claude Code agent-teams
   task and coordination state into the
