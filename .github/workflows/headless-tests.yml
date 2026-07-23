@@ -41,6 +41,20 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install iTerm2 app bundle (for osacompile terminology only)
+        # The spawn/tmux dry-run suites include an AppleScript SYNTAX check:
+        # they osacompile the generated `tell application "iTerm2" ... end tell`
+        # script to prove the nested quoting survives. osacompile resolves the
+        # "iTerm2" terminology via LaunchServices, so the app bundle must exist
+        # on disk — even though nothing is launched and no Python API is used.
+        # This is NOT the live layer (that needs iTerm2 *running* + the API);
+        # it only lets the headless syntax check compile, matching a dev Mac.
+        run: |
+          brew install --cask iterm2
+          # Force LaunchServices registration so `tell application "iTerm2"`
+          # resolves at compile time without launching the app.
+          /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f /Applications/iTerm.app || true
+
       - name: Show environment
         run: |
           python3 --version
