@@ -1,0 +1,89 @@
+# Headless it2agent test suites (issue #128, part of #1).
+#
+# Runs the PURE layer of the it2agent tools on every push/PR to master: all
+# `test_*.py` (unittest) and `test_*.sh` suites under it2agent/**/tests/, plus
+# `live_smoke.py --only ccstatus` (the one live surface that needs no iTerm2 —
+# exact OSC 21337 bytes). The single source of truth for the suite list is
+# it2agent/tests/run_headless.sh, which discovers the suites dynamically; this
+# workflow just calls it.
+#
+# What is intentionally NOT here: the LIVE layer. The full gate
+# `python3 it2agent/tests/live_smoke.py --json` (spawn / tmux / mcp surfaces) and
+# the *_live.sh suites need a real iTerm2 3.7.dev with the Python API on and a
+# GUI session. Hosted GitHub runners have none of that, so those run only on a
+# self-hosted macOS runner or by hand on the Mac (see run_headless.sh header).
+# We do NOT fake the live layer in hosted CI.
+#
+# Hermeticity: this job never runs `it2agent install` (that would drop
+# ~/.local/bin flag wrappers and break the "flag OFF/absent -> gated off" cases),
+# and the runner isolates the flag config so flags read OFF by default — matching
+# a fresh host. This runs alongside the existing test.yml (Python-API lib +
+# Xcode) without touching or duplicating it.
+
+name: Headless Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  headless:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install iTerm2 app bundle (for osacompile terminology only)
+        # The spawn/tmux dry-run suites include an AppleScript SYNTAX check:
+        # they osacompile the generated `tell application "iTerm2" ... end tell`
+        # script to prove the nested quoting survives. osacompile resolves the
+        # "iTerm2" terminology via LaunchServices, so the app bundle must exist
+        # on disk — even though nothing is launched and no Python API is used.
+        # This is NOT the live layer (that needs iTerm2 *running* + the API);
+        # it only lets the headless syntax check compile, matching a dev Mac.
+        # continue-on-error: this is a best-effort assist for the AppleScript
+        # syntax checks. If it cannot make terminology resolve, the runner skips
+        # those two checks (see IT2AGENT_SKIP_OSACOMPILE below) so the job stays
+        # meaningful rather than red on an environment limitation.
+        continue-on-error: true
+        run: |
+          brew install --cask iterm2
+          # A Gatekeeper-quarantined bundle is refused by LaunchServices name
+          # resolution — the exact lookup osacompile does for
+          # `tell application "iTerm2"`. Strip the quarantine xattr, then force
+          # LaunchServices to register the bundle (no launch, no window server).
+          sudo xattr -dr com.apple.quarantine /Applications/iTerm.app || true
+          /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f /Applications/iTerm.app || true
+          # Probe with an iTerm2-SPECIFIC command (the terms the suites actually
+          # use), not a standard property like `name` — iTerm2 supplies that
+          # terminology dynamically, which needs the app running (a GUI/window
+          # server the hosted runner lacks), so a `name`-only probe gives a
+          # false positive. Publish the result to later steps.
+          if osacompile -o /dev/null -e 'tell application "iTerm2" to create window with default profile' >/dev/null 2>&1; then
+            echo "osacompile resolves iTerm2 terminology"
+          else
+            echo "::warning::osacompile cannot resolve iTerm2 terminology on this runner; skipping the spawn/tmux AppleScript-syntax checks (they run on a dev Mac / self-hosted runner with iTerm2)"
+            echo "IT2AGENT_SKIP_OSACOMPILE=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Show environment
+        run: |
+          python3 --version
+          bash --version | head -1
+          # Confirm PATH is clean: no it2agent-flag wrapper (we never install).
+          if command -v it2agent-flag >/dev/null 2>&1; then
+            echo "::warning::it2agent-flag unexpectedly on PATH; gate tests may leak"
+          else
+            echo "it2agent-flag absent from PATH (expected)"
+          fi
+
+      - name: Run headless test suites
+        run: bash it2agent/tests/run_headless.sh
