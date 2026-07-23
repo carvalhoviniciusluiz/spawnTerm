@@ -342,9 +342,9 @@ O terminal se torna auto-descritível: um guia **gerado do schema** (sempre atua
 it2agent brief                                   # resumo das capacidades ativas + como usar
 it2agent guide --check ; echo "drift exit=$?"    # 0 = guia em sincronia com o schema/tools
 # hook autobrief: OFF não injeta nada; ON injeta additionalContext (SessionStart)
-printf '{}' | it2agent-autobrief-hook            # flag OFF → sem stdout, exit 0
+printf '{}' | it2agent-autobrief-hook session-start   # flag OFF → sem stdout, exit 0
 it2agent-flag enable agent.autobrief
-printf '{}' | IT2AGENT_FORCE=1 it2agent-autobrief-hook | python3 -m json.tool | head -5
+printf '{}' | IT2AGENT_FORCE=1 it2agent-autobrief-hook session-start | python3 -m json.tool | head -5
 ```
 ✅ se `brief` lista as capacidades ativas; `guide --check` sai 0 (sem drift); o hook é **observador
 seguro** (OFF→nada/exit 0; ON→JSON `hookSpecificOutput.additionalContext` com o brief).
@@ -365,8 +365,8 @@ canonical = true
 isolate = ["docker","db"]
 assign = "restart"
 TOML
-( cd "$TMPREPO" && IT2AGENT_FORCE=1 it2agent-worktree plan --id demo --role backend )   # aplica o arquivo
-( cd "$TMPREPO" && IT2AGENT_FORCE=1 it2agent-worktree plan --id demo --role backend --ports api --assign none )  # CLI sobrescreve
+( cd "$TMPREPO" && IT2AGENT_FORCE=1 it2agent-worktree create --repo "$TMPREPO" --id demo --role backend --dry-run )   # aplica o arquivo (canonical/isolate/assign aparecem no create --dry-run, não no plan que é allocation-only)
+( cd "$TMPREPO" && IT2AGENT_FORCE=1 it2agent-worktree create --repo "$TMPREPO" --id demo --role backend --ports api --assign none --dry-run )  # CLI sobrescreve o arquivo
 ```
 ✅ se o 1º plano reflete ports web/db + canônica + isolate docker,db + assign=restart; e o 2º mostra
 que os flags de CLI **sobrescrevem** o arquivo (só `api`, sem assign).
