@@ -43,7 +43,28 @@ RUN IT (the ONE command — operator, on the Mac, in an iTerm2 3.7.dev tab)
 
 Scope to one surface:            python3 it2agent/tests/live_smoke.py --only spawn
 Machine-readable (future CI):    python3 it2agent/tests/live_smoke.py --json
-Tune the tmux name matcher:      python3 it2agent/tests/live_smoke.py --only tmux --tmux-matcher <substr>
+Override the tmux matcher:       python3 it2agent/tests/live_smoke.py --only tmux --tmux-matcher <substr>
+Tune the tmux wait timeout:      python3 it2agent/tests/live_smoke.py --only tmux --tmux-timeout 60
+
+TMUX SURFACE — UNIQUE MARKER, NOT basename (#127)
+-------------------------------------------------
+The tmux surface used to probe for its integrated iTerm2 session by the temp
+repo's basename substring, which risked matching an UNRELATED `tmux -CC` session
+whose name merely contained that substring — and it silently took the first hit,
+so the wrong-session failure was non-deterministic. Now every run mints a UNIQUE
+token (``it2smoke-<pid>-<rand>``), embeds it in the temp repo's basename (so the
+integrated session's cwd-derived `name` carries it) AND passes it as ``--id`` (so
+the tmux session name carries it too), then matches THAT exact token. If more than
+one iTerm2 session matches the unique token the surface FAILS LOUDLY rather than
+guessing — a per-run token must resolve to exactly one session.
+
+The wait for that integrated session is bounded (default 30s, override via
+``--tmux-timeout`` or ``IT2AGENT_SMOKE_TMUX_TIMEOUT``). Under CI load this wait is
+the single biggest flakiness source: tmux -CC attaches the iTerm2 session a beat
+after the tmux session exists, and a busy machine can push that past the deadline.
+CI should treat a tmux-surface TIMEOUT (a SKIP-shaped/no-session-found FAIL) as
+RETRYABLE / non-fatal, or bump IT2AGENT_SMOKE_TMUX_TIMEOUT, rather than reddening
+the build on a single slow attach.
 
 PREFLIGHT — it fails EARLY and CLEAR, and never fakes
 -----------------------------------------------------
@@ -82,6 +103,7 @@ import argparse
 import json
 import os
 import random
+import secrets
 import shutil
 import subprocess
 import sys
@@ -125,6 +147,12 @@ API_SOCKET_PATH = os.path.expanduser(
 PASS = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
+
+# Default bound (seconds) for the wait on the integrated tmux -CC iTerm2 session
+# to register. Overridable per-run via --tmux-timeout or the env var below. Under
+# CI this wait is the tmux surface's main flakiness source (see module docstring).
+DEFAULT_TMUX_TIMEOUT = 30.0
+TMUX_TIMEOUT_ENV = "IT2AGENT_SMOKE_TMUX_TIMEOUT"
 
 # Surface order is the run order. `requires_live` gates on the preflight; only
 # ccstatus runs with no live iTerm2.
@@ -304,6 +332,81 @@ def build_validate_tmux_cmd(python: str, matcher: str) -> list[str]:
     return [python, str(VALIDATE_CLI), "--session", matcher]
 
 
+def make_run_token() -> str:
+    """A UNIQUE per-run marker for the tmux surface (#127).
+
+    ``it2smoke-<pid>-<rand>``: the ``it2smoke`` prefix keeps it greppable and
+    self-cleaning-friendly, the pid + 6 hex chars make a collision between two
+    concurrent runs (or a stale session left by a prior run) astronomically
+    unlikely. This is ordinary Python — os.getpid()+secrets is fine here — not the
+    no-Date.now/no-random world of the emitter. Only [a-z0-9-] so it survives
+    intact as a substring of both a filesystem basename and a sanitized tmux
+    session name. PURE (modulo pid/entropy)."""
+    return f"it2smoke-{os.getpid()}-{secrets.token_hex(3)}"
+
+
+def resolve_tmux_timeout(cli_value: float | None = None, env: dict | None = None) -> float:
+    """Resolve the tmux-session wait timeout. PURE + injectable.
+
+    Precedence: an explicit --tmux-timeout (``cli_value``) wins; else the
+    ``IT2AGENT_SMOKE_TMUX_TIMEOUT`` env var if it parses to a positive float; else
+    DEFAULT_TMUX_TIMEOUT. A malformed/non-positive env value is ignored (falls
+    back to the default) rather than crashing the run."""
+    if cli_value is not None:
+        return cli_value
+    env = os.environ if env is None else env
+    raw = (env.get(TMUX_TIMEOUT_ENV) or "").strip()
+    if raw:
+        try:
+            val = float(raw)
+        except ValueError:
+            return DEFAULT_TMUX_TIMEOUT
+        if val > 0:
+            return val
+    return DEFAULT_TMUX_TIMEOUT
+
+
+def _is_tmux_cc_tty(tty) -> bool:
+    """True iff ``tty`` looks like a tmux -CC integrated iTerm2 session's tty.
+
+    Such sessions have NO real tty. Over the Python API the ``tty`` variable comes
+    back as None; the ``""`` / ``"None"`` string forms are tolerated only because
+    older/edge iTerm2 builds have been observed to surface those instead of a true
+    null. A real terminal tty (e.g. ``/dev/ttys003``) is correctly excluded. PURE."""
+    return tty is None or tty in ("", "None")
+
+
+class TmuxSessionMatchError(RuntimeError):
+    """Raised when a UNIQUE tmux marker matches more than one iTerm2 session —
+    the wrong-session ambiguity #127 exists to eliminate. We fail loudly instead
+    of silently taking the first hit."""
+
+
+def select_tmux_session(candidates, matcher: str):
+    """Pick THE one integrated tmux -CC session matching ``matcher``. PURE.
+
+    ``candidates`` is an iterable of ``(name, tty)`` pairs (one per live iTerm2
+    session). A candidate matches iff its name contains ``matcher``
+    (case-insensitive) AND its tty is a tmux-CC (null-ish) tty. Returns the single
+    matching name, or None if none match yet (keep polling). Raises
+    TmuxSessionMatchError if MORE THAN ONE matches — a unique per-run token must
+    resolve to exactly one session, so >1 means the marker was not actually unique
+    (or a stale session lingers) and we must not guess."""
+    ml = (matcher or "").lower()
+    matches = [
+        (name or "")
+        for name, tty in candidates
+        if ml and ml in (name or "").lower() and _is_tmux_cc_tty(tty)
+    ]
+    if len(matches) > 1:
+        raise TmuxSessionMatchError(
+            f"{len(matches)} iTerm2 sessions matched the unique tmux marker "
+            f"{matcher!r} (expected exactly 1): {matches!r}. A per-run token must "
+            "resolve to a single session — refusing to guess which is ours."
+        )
+    return matches[0] if matches else None
+
+
 # --------------------------------------------------------------------------- #
 # lsof / tmux-output parsing (pure — unit-tested)
 # --------------------------------------------------------------------------- #
@@ -447,10 +550,17 @@ def _git(repo: str, *argv: str) -> None:
 # --------------------------------------------------------------------------- #
 class Harness:
     def __init__(self, *, tmux_matcher: str | None = None, no_cleanup: bool = False,
-                 python: str | None = None):
+                 python: str | None = None, tmux_timeout: float | None = None):
         self.python = python or sys.executable
         self.no_cleanup = no_cleanup
         self.tmux_matcher = tmux_matcher
+        self.tmux_timeout = DEFAULT_TMUX_TIMEOUT if tmux_timeout is None else tmux_timeout
+
+        # A UNIQUE per-run marker for the tmux surface (#127): embedded in the temp
+        # repo basename (-> the integrated session's cwd-derived name) and passed
+        # as --id (-> the tmux session name), then matched exactly. Ends the
+        # basename-substring wrong-session risk.
+        self.run_token = make_run_token()
 
         # Short /tmp dir for the unix socket + isolated config (the ~104-byte
         # socket path limit; macOS mktemp under /var/folders overflows it).
@@ -480,8 +590,8 @@ class Harness:
         self._spawned_agent_ids.append(aid)
         return aid
 
-    def temp_repo(self) -> str:
-        repo = make_temp_git_repo()
+    def temp_repo(self, prefix: str = "it2smoke") -> str:
+        repo = make_temp_git_repo(prefix=prefix)
         self._temp_repos.append(repo)
         return repo
 
@@ -577,16 +687,24 @@ class Harness:
         if shutil.which("tmux") is None:
             return SurfaceResult("tmux", SKIP, reason="tmux binary not found on PATH")
 
-        repo = self.temp_repo()
-        matcher = self.tmux_matcher or os.path.basename(repo)
+        # UNIQUE marker (#127): put the token in the repo basename (-> the
+        # integrated session's cwd-derived name) so the match can no longer land on
+        # an unrelated tmux -CC session. --tmux-matcher still overrides for manual
+        # debugging, but the default is the unique token, never the bare basename.
+        repo = self.temp_repo(prefix=self.run_token)
+        matcher = self.tmux_matcher or self.run_token
         role, task = "probe", "smoke"
-        tmux_name = self._tmux_session_name(role, task)
+        # Also carry the token as the agent id so the tmux SESSION name is unique
+        # too (belt and suspenders, and it makes cleanup target exactly our
+        # session rather than a shared st-probe-smoke that a concurrent run reuses).
+        tmux_name = self._tmux_session_name(role, task, agent_id=self.run_token)
         if tmux_name:
             self._tmux_sessions.append(tmux_name)
 
         spawn = subprocess.run(
             [str(TMUX_CLI), "spawn", "--no-gate", "--role", role, "--task", task,
-             "--dir", repo, "--", os.environ.get("SHELL", "/bin/sh")],
+             "--id", self.run_token, "--dir", repo, "--",
+             os.environ.get("SHELL", "/bin/sh")],
             env=self.child_env(IT2AGENT_FORCE="1"),
             capture_output=True, text=True, timeout=45,
         )
@@ -601,9 +719,10 @@ class Harness:
         # (tty=None) named after the cwd — so waiting on `tmux has-session` (the
         # tmux side) alone is not enough and caused a false FAIL (#AC14). Wait for
         # the tmux side to come up, then poll the iTerm2 app for the integrated
-        # session and validate against its REAL name (unambiguous match).
+        # session carrying our UNIQUE token and validate against its REAL name
+        # (exactly one match, or a loud FAIL — never a silent first-hit guess).
         _wait_for_tmux_session(tmux_name, timeout=8.0)
-        observed = _wait_for_iterm_tmux_session(matcher, timeout=30.0)
+        observed = _wait_for_iterm_tmux_session(matcher, timeout=self.tmux_timeout)
         if observed:
             matcher = observed
 
@@ -625,11 +744,15 @@ class Harness:
         return SurfaceResult("tmux", PASS if ok else FAIL, evidence=ev,
                              reason="" if ok else "one of tmux surfaces 2/4/5 did not PASS")
 
-    def _tmux_session_name(self, role: str, task: str) -> str:
+    def _tmux_session_name(self, role: str, task: str, agent_id: str | None = None) -> str:
+        argv = [str(TMUX_CLI), "name", "--role", role, "--task", task]
+        if agent_id:
+            # --id takes precedence in it2agent-tmux's name derivation, so this is
+            # the same unique name `spawn --id <token>` will create.
+            argv += ["--id", agent_id]
         try:
             out = subprocess.run(
-                [str(TMUX_CLI), "name", "--role", role, "--task", task],
-                capture_output=True, text=True, timeout=15,
+                argv, capture_output=True, text=True, timeout=15,
             )
             return out.stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -821,16 +944,18 @@ def _wait_for_tmux_session(name: str, timeout: float = 6.0) -> bool:  # pragma: 
 
 async def _await_tmux_iterm_session(connection, matcher, timeout):  # pragma: no cover - live
     """Poll the iTerm2 app (single connection) until the integrated tmux -CC
-    session registers: a session whose `name` contains `matcher` AND whose `tty`
-    is None (the tell-tale of a tmux-CC-backed iTerm2 session). Returns the real
-    iTerm2 session name, or None on timeout."""
+    session registers: a session whose `name` contains the UNIQUE `matcher` token
+    AND whose `tty` is null-ish (the tell-tale of a tmux-CC-backed iTerm2 session).
+    Returns the real iTerm2 session name, or None on timeout. If more than one
+    session matches the unique token, select_tmux_session raises
+    TmuxSessionMatchError (propagated as a loud FAIL) rather than guessing (#127)."""
     import asyncio
     import iterm2
 
     app = await iterm2.async_get_app(connection)
     deadline = time.time() + timeout
-    ml = (matcher or "").lower()
     while time.time() < deadline:
+        candidates: list[tuple[str, object]] = []
         for window in app.terminal_windows:
             for tab in window.tabs:
                 for session in tab.sessions:
@@ -839,13 +964,15 @@ async def _await_tmux_iterm_session(connection, matcher, timeout):  # pragma: no
                         tty = await session.async_get_variable("tty")
                     except Exception:  # noqa: BLE001
                         continue
-                    if ml in name.lower() and tty in (None, "None", ""):
-                        return name
+                    candidates.append((name, tty))
+        found = select_tmux_session(candidates, matcher)  # raises loudly on >1
+        if found is not None:
+            return found
         await asyncio.sleep(0.5)
     return None
 
 
-def _wait_for_iterm_tmux_session(matcher: str, timeout: float = 30.0) -> str | None:  # pragma: no cover - live
+def _wait_for_iterm_tmux_session(matcher: str, timeout: float = DEFAULT_TMUX_TIMEOUT) -> str | None:  # pragma: no cover - live
     """Wait for the iTerm2-side integrated tmux -CC session to register (#AC14).
 
     tmux -CC integration attaches the iTerm2 session ASYNCHRONOUSLY, a beat after
@@ -853,7 +980,12 @@ def _wait_for_iterm_tmux_session(matcher: str, timeout: float = 30.0) -> str | N
     mean the validator can see the session yet. Waiting on the tmux side alone
     caused a false FAIL (the validator ran before the iTerm2 session existed and,
     correctly, refused to fall back to the current session). This polls the
-    iTerm2 app for the real integrated session and returns its name."""
+    iTerm2 app for the real integrated session and returns its name.
+
+    ``timeout`` is bounded and configurable (--tmux-timeout / the
+    IT2AGENT_SMOKE_TMUX_TIMEOUT env, default DEFAULT_TMUX_TIMEOUT). It is the tmux
+    surface's main CI flakiness source — a slow attach under load can exceed it;
+    CI should retry / treat a timeout as non-fatal rather than reddening (#127)."""
     return _run_live(_await_tmux_iterm_session, matcher, timeout)
 
 
@@ -941,9 +1073,13 @@ def run(argv: list[str] | None = None) -> int:
                         help="run one surface (or a comma list): " + ", ".join(SURFACE_ORDER))
     parser.add_argument("--json", action="store_true", help="emit a machine-readable summary object.")
     parser.add_argument("--tmux-matcher", default=None,
-                        help="substring of the iTerm2 session name to probe for the tmux surface "
-                             "(default: the temp repo basename). Tune this if the tmux surface "
-                             "reports a no-match (#82).")
+                        help="override the iTerm2 session-name substring the tmux surface probes for "
+                             "(default: a UNIQUE per-run token, #127). Only needed to debug a "
+                             "no-match (#82); the default no longer risks a wrong-session hit.")
+    parser.add_argument("--tmux-timeout", type=float, default=None,
+                        help="seconds to wait for the integrated tmux -CC iTerm2 session to register "
+                             f"(default {DEFAULT_TMUX_TIMEOUT:g}; env {TMUX_TIMEOUT_ENV}). Under CI this "
+                             "wait is the main flakiness source — bump it or treat a timeout as retryable.")
     parser.add_argument("--no-cleanup", action="store_true",
                         help="leave tracked resources in place (debugging).")
     args = parser.parse_args([] if argv is None else argv)
@@ -956,7 +1092,9 @@ def run(argv: list[str] | None = None) -> int:
 
     preflight = detect_preflight()
 
-    harness = Harness(tmux_matcher=args.tmux_matcher, no_cleanup=args.no_cleanup)
+    tmux_timeout = resolve_tmux_timeout(args.tmux_timeout)
+    harness = Harness(tmux_matcher=args.tmux_matcher, no_cleanup=args.no_cleanup,
+                      tmux_timeout=tmux_timeout)
     results: list[SurfaceResult] = []
     cleanup_log: list[str] = []
     try:

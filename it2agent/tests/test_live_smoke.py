@@ -189,6 +189,104 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(launched)
 
 
+class TmuxMarkerTests(unittest.TestCase):
+    """The #127 hardening: a UNIQUE per-run token replaces the basename matcher,
+    the match is exact + tty-gated, >1 match fails loudly, and the wait timeout is
+    configurable. All the decision logic is pure and covered here; the live poll
+    itself stays untested (needs the app)."""
+
+    def test_run_token_shape_and_uniqueness(self):
+        a = ls.make_run_token()
+        b = ls.make_run_token()
+        self.assertTrue(a.startswith("it2smoke-"))
+        self.assertIn(str(os.getpid()), a)
+        self.assertNotEqual(a, b)  # entropy tail differs per call
+        # Only [a-z0-9-] so it survives intact inside a basename / tmux name.
+        import re
+        self.assertRegex(a, r"^[a-z0-9-]+$")
+
+    def test_harness_mints_unique_token(self):
+        h1 = ls.Harness()
+        h2 = ls.Harness()
+        try:
+            self.assertTrue(h1.run_token.startswith("it2smoke-"))
+            self.assertNotEqual(h1.run_token, h2.run_token)
+        finally:
+            h1.cleanup()
+            h2.cleanup()
+
+    def test_resolve_tmux_timeout_default(self):
+        self.assertEqual(ls.resolve_tmux_timeout(None, env={}), ls.DEFAULT_TMUX_TIMEOUT)
+
+    def test_resolve_tmux_timeout_cli_wins(self):
+        self.assertEqual(
+            ls.resolve_tmux_timeout(60.0, env={ls.TMUX_TIMEOUT_ENV: "5"}), 60.0)
+
+    def test_resolve_tmux_timeout_env(self):
+        self.assertEqual(
+            ls.resolve_tmux_timeout(None, env={ls.TMUX_TIMEOUT_ENV: "45"}), 45.0)
+
+    def test_resolve_tmux_timeout_bad_env_falls_back(self):
+        self.assertEqual(
+            ls.resolve_tmux_timeout(None, env={ls.TMUX_TIMEOUT_ENV: "notanumber"}),
+            ls.DEFAULT_TMUX_TIMEOUT)
+        self.assertEqual(
+            ls.resolve_tmux_timeout(None, env={ls.TMUX_TIMEOUT_ENV: "-3"}),
+            ls.DEFAULT_TMUX_TIMEOUT)
+
+    def test_harness_honors_timeout(self):
+        h = ls.Harness(tmux_timeout=12.5)
+        try:
+            self.assertEqual(h.tmux_timeout, 12.5)
+        finally:
+            h.cleanup()
+
+    def test_is_tmux_cc_tty(self):
+        for good in (None, "", "None"):
+            self.assertTrue(ls._is_tmux_cc_tty(good))
+        for bad in ("/dev/ttys003", "/dev/ttys000"):
+            self.assertFalse(ls._is_tmux_cc_tty(bad))
+
+    def test_select_single_match(self):
+        cands = [
+            ("it2smoke-1234-abcdef-tmp99", None),   # our tmux session (no tty)
+            ("some-other-window", "/dev/ttys003"),  # a normal terminal
+        ]
+        self.assertEqual(
+            ls.select_tmux_session(cands, "it2smoke-1234-abcdef"),
+            "it2smoke-1234-abcdef-tmp99")
+
+    def test_select_no_match_returns_none(self):
+        cands = [("unrelated", None), ("editor", "/dev/ttys004")]
+        self.assertIsNone(ls.select_tmux_session(cands, "it2smoke-9999-zzzzzz"))
+
+    def test_select_ignores_matching_name_with_real_tty(self):
+        # Same name substring but a REAL tty -> not the integrated tmux session.
+        cands = [("it2smoke-1-aa-x", "/dev/ttys005")]
+        self.assertIsNone(ls.select_tmux_session(cands, "it2smoke-1-aa"))
+
+    def test_select_case_insensitive(self):
+        cands = [("IT2SMOKE-7-BEEF-run", None)]
+        self.assertEqual(
+            ls.select_tmux_session(cands, "it2smoke-7-beef"),
+            "IT2SMOKE-7-BEEF-run")
+
+    def test_select_multiple_matches_fails_loudly(self):
+        cands = [
+            ("it2smoke-1-aa-first", None),
+            ("it2smoke-1-aa-second", ""),  # both look like tmux-CC sessions
+        ]
+        with self.assertRaises(ls.TmuxSessionMatchError) as ctx:
+            ls.select_tmux_session(cands, "it2smoke-1-aa")
+        msg = str(ctx.exception)
+        self.assertIn("2 iTerm2 sessions matched", msg)
+        self.assertIn("refusing to guess", msg)
+
+    def test_select_empty_matcher_never_matches(self):
+        cands = [("anything", None)]
+        self.assertIsNone(ls.select_tmux_session(cands, ""))
+
+
 class SummaryAndExitTests(unittest.TestCase):
     def _results(self, *pairs):
         return [ls.SurfaceResult(n, s) for n, s in pairs]
