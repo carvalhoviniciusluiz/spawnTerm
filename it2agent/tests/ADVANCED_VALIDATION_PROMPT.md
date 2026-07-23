@@ -43,6 +43,44 @@ export IT2AGENT_BROKER_SOCK="$(mktemp -d)/broker.sock"
 echo "config=$IT2AGENT_CONFIG"; echo "db=$IT2AGENT_BROKER_DB"; echo "sock=$IT2AGENT_BROKER_SOCK"
 ```
 
+## 0.5. Preflight da Python API (rode antes dos ACs 🔴) 🤖
+**Por que isto existe (lição do run #73):** ter o módulo `iterm2` instalado **não** significa que a
+Python API está pronta. Se o *servidor* da API estiver DESLIGADO, `import iterm2` passa mas toda
+conexão falha com “problem connecting to iTerm2”, e AC1-daemon/AC6/AC8-abertura-de-aba morrem sem
+motivo aparente. Este preflight checa as **três** coisas que precisam estar verdadeiras: (a) o módulo
+importa, (b) `EnableAPIServer` = `1`, (c) o socket da API existe.
+
+**Passo:**
+```sh
+# (a) módulo instalado?
+python3 -c 'import iterm2' 2>/dev/null && echo "modulo=OK" || echo "modulo=FALTA (pip3 install iterm2)"
+# (b) o SERVIDOR da API está ligado? (a lição do #73: isto costuma estar 0)
+APISRV="$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || echo 0)"
+echo "EnableAPIServer=$APISRV"
+# (c) o socket da API existe? (o cliente python conecta neste unix socket)
+SOCK1="$HOME/Library/Application Support/iTerm2/private/socket"
+SOCK2="$HOME/Library/ApplicationSupport/iTerm2/private/socket"
+if [ -S "$SOCK1" ] || [ -S "$SOCK2" ]; then echo "api_socket=OK"; else echo "api_socket=FALTA"; fi
+
+# Veredito: só está pronto se as três baterem.
+if [ "$APISRV" = "1" ] && { [ -S "$SOCK1" ] || [ -S "$SOCK2" ]; } && python3 -c 'import iterm2' 2>/dev/null; then
+  echo "✅ PREFLIGHT: Python API pronta — AC1-daemon, AC6 e AC8 (abertura de aba) são validáveis ao vivo."
+else
+  echo "⚠️  PREFLIGHT: Python API NÃO está pronta."
+  echo "    → Ligue em: Settings → General → Magic → Enable Python API (e aprove o diálogo de conexão)."
+  echo "    → Confirme com: defaults read com.googlecode.iterm2 EnableAPIServer  (deve ser 1)."
+  echo "    → Enquanto estiver OFF, ficam PENDENTE-AO-VIVO: AC1 (spawn via daemon), AC6 (tmux -CC +"
+  echo "      validate_api_over_tmux.py) e AC8 (abertura de aba via MCP). As partes 🤖 destes ACs"
+  echo "      (planos a seco, mecânica de broker/MCP) ainda rodam; só a superfície que fala com a API fica pendente."
+fi
+```
+**Esperado:** as três linhas mostram `modulo=OK`, `EnableAPIServer=1` e `api_socket=OK`, seguidas de
+`✅ PREFLIGHT: Python API pronta`. Se aparecer o aviso `⚠️`, **não finja** os ACs 🔴 que dependem da
+API: marque AC1/AC6/AC8-abertura como `pendente-ao-vivo` no relatório até o operador ligar a API.
+> **OPERADOR:** se viu o `⚠️`, abra **Settings → General → Magic → Enable Python API**, aprove o
+> diálogo de conexão que o iTerm2 mostra, e rode este preflight de novo antes de seguir. Sem isso os
+> ACs 🔴-de-API não têm como passar. 🔴
+
 ---
 
 ## AC1 — Spawn real de N abas pelo daemon 🔴👁
