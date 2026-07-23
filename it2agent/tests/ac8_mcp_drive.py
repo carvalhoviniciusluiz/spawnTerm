@@ -137,12 +137,18 @@ def main() -> int:
             obj = json.loads(raw)
             responses[obj.get("id")] = obj
 
-        # tools/list must expose the 7 tools.
+        # tools/list must expose (at least) the 7 core orchestration tools.
+        # The surface grew to 9 with team_tasks/read_messages (#94/#98), so
+        # assert the core set is PRESENT rather than an exact count — robust to
+        # future additions.
+        core_tools = {"spawn", "assign", "handoff", "send_message",
+                      "status", "list_agents", "help"}
         tools = (responses.get(2, {}).get("result") or {}).get("tools") or []
         names = [t.get("name") for t in tools]
-        print("tools/list ->", names)
-        if len(names) != 7:
-            failures.append("tools/list returned %d tools, expected 7" % len(names))
+        print("tools/list -> %d tools:" % len(names), names)
+        missing = core_tools - set(names)
+        if missing:
+            failures.append("tools/list missing core tools: %s" % sorted(missing))
 
         sp = structured(responses.get(3, {}))
         asg = structured(responses.get(4, {}))
