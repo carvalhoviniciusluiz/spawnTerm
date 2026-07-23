@@ -111,8 +111,15 @@ spawn — start (or reattach) a named tmux -CC session and run the agent in it.
     --id <id>        Agent id anchoring the isolation allocation + session name.
     --base-port <n>  Base of the per-agent port range (default 41000).
     --no-probe       Skip free-port probing; use the deterministic port as-is.
+    --force-isolation
+                     Force worktree/port isolation ON even when the
+                     "agent.worktree_isolation" flag is OFF (explicit opt-in for
+                     local testing). Distinct from --no-gate, which never enables
+                     isolation.
   Gating / testing:
-    --no-gate        Bypass the agent.tmux gate (and forward to emit/worktree).
+    --no-gate        Bypass the agent.tmux gate (and forward to the identity
+                     emits). Does NOT enable worktree isolation — use
+                     --force-isolation for that.
     --dry-run        Print the tmux -CC command + osascript that WOULD run; run
                      nothing. (Also IT2AGENT_TMUX_DRYRUN=1.)
 
@@ -120,8 +127,10 @@ attach — reopen an existing tmux -CC session in a new iTerm2 tab (recovery).
 name   — print the derived, sanitized tmux session name and exit.
 
 Environment:
-  IT2AGENT_TMUX_DRYRUN=1   Same as --dry-run.
-  IT2AGENT_FORCE=1         Bypass the agent.tmux gate (forwarded to emit).
+  IT2AGENT_TMUX_DRYRUN=1      Same as --dry-run.
+  IT2AGENT_FORCE=1            Bypass the agent.tmux gate (forwarded to emit). Does
+                             NOT enable worktree isolation.
+  IT2AGENT_FORCE_ISOLATION=1  Same as --force-isolation.
 
 Gating: \`spawn\` gates on \`$FLAG_KEY\` (default OFF). When OFF, \`spawn\`
 delegates to it2agent-spawn (no tmux wrapping) so behavior is exactly #10.
@@ -182,32 +191,38 @@ resolve_session_name() {
 	sanitize_name "$basis"
 }
 
-# --- build the AppleScript that opens a tab and runs one command line ---------
+# --- build the AppleScript that opens a tab running one command --------------
 # iTerm2 scripting model: create a tab in the current window (or a new window if
-# none is open), then `write text` a SINGLE command line into it. For the tmux
-# path that single line is the whole `tmux -CC ...` invocation (the agent setup
-# script is carried INSIDE it as a `sh -lc` argument on one physical line, so
-# `write text` does not submit it piecemeal at embedded newlines).
+# none is open) whose `command` IS the given command line. For the tmux path
+# that command is the whole `tmux -CC ...` invocation (the agent setup script is
+# carried INSIDE it as a `sh -lc` argument).
+#
+# We launch it via the `command` parameter, NOT `write text` (#74 fix). Typing
+# the line into the new tab's interactive shell was racy: `write text` targeted
+# `current session` (re-read after `create tab`, so back-to-back spawns could
+# hit the wrong session), and it fed the shell's line editor before it was ready
+# (stray typeahead bytes prepended -> `command not found`). Launching as the
+# session command runs it in exactly the tab we create, with nothing typed —
+# both races gone. Launching `tmux -CC ...` as the session program is also the
+# canonical way to start iTerm2's tmux integration.
 build_applescript() {
 	body="$(as_esc "$1")"
 	cat <<APPLESCRIPT
 tell application "iTerm2"
 	if (count of windows) = 0 then
-		set targetWindow to (create window with default profile)
+		create window with default profile command "${body}"
 	else
-		set targetWindow to current window
-		tell targetWindow to create tab with default profile
+		tell current window to create tab with default profile command "${body}"
 	end if
-	tell current session of targetWindow
-		write text "${body}"
-	end tell
 end tell
 APPLESCRIPT
 }
 
 run_applescript() {
 	command -v osascript >/dev/null 2>&1 || die "osascript not found (this wrapper requires macOS/iTerm2)"
-	build_applescript "$1" | osascript -
+	# Discard osascript's stdout (it echoes the created-tab reference); keep stderr
+	# so real AppleScript/iTerm errors still surface.
+	build_applescript "$1" | osascript - >/dev/null
 }
 
 # =============================================================================
@@ -322,11 +337,19 @@ run_tmux_path() {
 	elif [ -n "$DIR" ]; then CWD="$DIR"
 	else CWD="$PWD"; fi
 
-	# -- worktree + port/namespace isolation (#13), same as it2agent-spawn ----
-	ISOLATION_ON=0; ISOLATION_PLAN=""; ISO_EXPORTS=""
+	# -- worktree + port/namespace isolation (#13), same gate as it2agent-spawn.
+	#    P2 fix (#75, mirrors fae9d53e7): isolation is opt-in via its OWN flag
+	#    agent.worktree_isolation, or an explicit --force-isolation /
+	#    IT2AGENT_FORCE_ISOLATION=1. It is NOT turned on by --no-gate /
+	#    IT2AGENT_FORCE — those only open the tmux gate and forward to the identity
+	#    emits. Only when isolation is FORCED past an OFF flag do we forward
+	#    --no-gate to the worktree helper so it runs in lockstep with this wrapper.
+	ISOLATION_ON=0; ISOLATION_PLAN=""; ISO_EXPORTS=""; ISO_FORCED=0
 	iso_gate_open() {
-		[ "${IT2AGENT_FORCE:-}" = "1" ] && return 0
-		[ "$NO_GATE" = "1" ] && return 0
+		if [ "$FORCE_ISOLATION" = "1" ]; then
+			ISO_FORCED=1
+			return 0
+		fi
 		fl2="$(find_flag 2>/dev/null)" || return 1
 		"$fl2" agent.worktree_isolation >/dev/null 2>&1
 	}
@@ -347,7 +370,7 @@ run_tmux_path() {
 		[ -n "$TASK" ] && set -- "$@" --task "$TASK"
 		[ -n "$BASE_PORT" ] && set -- "$@" --base-port "$BASE_PORT"
 		[ "$NO_PROBE" = "1" ] && set -- "$@" --no-probe
-		[ "$NO_GATE" = "1" ] && set -- "$@" --no-gate
+		[ "$ISO_FORCED" = "1" ] && set -- "$@" --no-gate
 		[ "$DRYRUN" = "1" ] && set -- "$@" --dry-run
 		ISOLATION_PLAN="$("$WT" "$@")" || die "it2agent-worktree create failed (see errors above)"
 		iso_val() { printf '%s\n' "$ISOLATION_PLAN" | sed -n "s/^$1=//p" | head -1; }
@@ -370,16 +393,33 @@ run_tmux_path() {
 	add_emit "color $(shq "$STATUS")"
 	add_emit "badge"
 
-	# -- the inner session script: ONE physical line (`;`-joined) so iTerm2's
-	#    `write text` submits the whole `tmux -CC ...` invocation as a single
-	#    command. cd -> per-agent env exports -> identity emits -> exec agent.
-	INNER="cd $(shq "$CWD") ; ${ISO_EXPORTS}${EMITS}exec ${RUN_CMD}"
+	# -- the inner session script (cd -> per-agent env exports -> identity emits ->
+	#    exec agent). We do NOT inline this into the tmux `command`: the emits are
+	#    already shell-quoted, so inlining would force a SECOND layer of
+	#    single-quote nesting inside iTerm2's `command` string (fragile, and the
+	#    #74 fix launches via `command`, not `write text`). Instead we write it to
+	#    a short-path /tmp boot file (same technique as it2agent-spawn) and the
+	#    tmux command just sources it — so the `command` string carries ONE clean
+	#    level of quoting. The script self-removes right before `exec`, so on a
+	#    reattach (new-session -A, where the -lc command is NOT re-run) nothing
+	#    lingers beyond a harmless unsourced /tmp file.
+	if [ "$DRYRUN" = "1" ]; then
+		BOOT="/tmp/it2agent-tmuxboot.XXXXXX"   # placeholder; no file in dry-run
+	else
+		BOOT="$(mktemp /tmp/it2agent-tmuxboot.XXXXXX)" || die "could not create boot tmpfile under /tmp"
+		chmod 600 "$BOOT"
+	fi
+	INNER_SCRIPT="cd $(shq "$CWD") ; ${ISO_EXPORTS}${EMITS}rm -f $BOOT ; exec ${RUN_CMD}"
+	[ "$DRYRUN" = "1" ] || printf '%s\n' "$INNER_SCRIPT" > "$BOOT"
 
 	# -- the tmux -CC invocation. `new-session -A` = create-or-reattach: first
-	#    spawn creates the session and runs INNER; a later spawn of the same
-	#    agent (same session name) reattaches the still-running agent and INNER
-	#    is NOT re-run. That is the persistence/reattach contract.
+	#    spawn creates the session and runs the boot script; a later spawn of the
+	#    same agent (same session name) reattaches the still-running agent and the
+	#    -lc command is NOT re-run. That is the persistence/reattach contract.
+	#    The boot path is a mktemp slug (no spaces/quotes), so the sourced line is
+	#    single-quote clean.
 	TMUX_SHELL="${SHELL:-/bin/sh}"
+	INNER=". $BOOT"
 	TMUX_CMD="tmux -CC new-session -A -s $(shq "$NAME") $(shq "$TMUX_SHELL") -lc $(shq "$INNER")"
 
 	APPLESCRIPT_TEXT="$(build_applescript "$TMUX_CMD")"
@@ -391,13 +431,18 @@ run_tmux_path() {
 		printf '  session name : %s\n' "$NAME"
 		printf '  resolved cwd : %s\n' "$CWD"
 		printf '  emit helper  : %s\n' "$EMIT"
-		printf '  isolation    : %s\n' "$([ "$ISOLATION_ON" = 1 ] && echo 'ON (agent.worktree_isolation) — per-agent worktree + port' || echo 'off (plain $PWD inheritance, = #10)')"
+		if [ "$ISOLATION_ON" = "1" ]; then
+			iso_why="$([ "$ISO_FORCED" = 1 ] && echo '--force-isolation' || echo 'agent.worktree_isolation')"
+			printf '  isolation    : ON (%s) — per-agent worktree + port\n' "$iso_why"
+		else
+			printf '  isolation    : off (plain $PWD inheritance, = #10)\n'
+		fi
 		if [ "$ISOLATION_ON" = "1" ]; then
 			printf '\n  worktree isolation plan (from it2agent-worktree):\n'
 			printf '%s\n' "$ISOLATION_PLAN" | sed 's/^/    /'
 		fi
-		printf '\n  inner session script (runs INSIDE tmux, one line):\n    %s\n' "$INNER"
-		printf '\n  tmux -CC command (typed into the launching iTerm2 tab):\n    %s\n' "$TMUX_CMD"
+		printf '\n  boot script (written to %s, sourced INSIDE tmux):\n    %s\n' "$BOOT" "$INNER_SCRIPT"
+		printf '\n  tmux -CC command (launched as the iTerm2 tab command, not typed):\n    %s\n' "$TMUX_CMD"
 		printf '\n  AppleScript that WOULD run:\n'
 		printf '%s\n' "$APPLESCRIPT_TEXT" | sed 's/^/    /'
 		exit 0
@@ -412,9 +457,13 @@ run_tmux_path() {
 # shell-quoted string) for the inner tmux session script.
 dispatch_spawn() {
 	DIR=""; USE_HOME=0; ROLE=""; TASK=""; STATUS="busy"
-	SESSION=""; AGENT_ID=""; BASE_PORT=""; NO_PROBE=0; NO_GATE=0
+	SESSION=""; AGENT_ID=""; BASE_PORT=""; NO_PROBE=0; NO_GATE=0; FORCE_ISOLATION=0
 	DRYRUN="${IT2AGENT_TMUX_DRYRUN:-0}"; [ "$DRYRUN" = "1" ] || DRYRUN=0
+	# IT2AGENT_FORCE=1 opens the tmux gate (and forwards to emit); it does NOT turn
+	# on worktree isolation (P2 fix, #75). Isolation is opt-in via its own flag or
+	# --force-isolation / IT2AGENT_FORCE_ISOLATION=1.
 	[ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
+	[ "${IT2AGENT_FORCE_ISOLATION:-}" = "1" ] && FORCE_ISOLATION=1
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--dir) [ $# -ge 2 ] || die "--dir requires a <path> argument"; DIR="$2"; shift 2 ;;
@@ -434,6 +483,7 @@ dispatch_spawn() {
 			--base-port=*) BASE_PORT="${1#--base-port=}"; shift ;;
 			--no-probe) NO_PROBE=1; shift ;;
 			--no-gate) NO_GATE=1; shift ;;
+			--force-isolation) FORCE_ISOLATION=1; shift ;;
 			--dry-run) DRYRUN=1; shift ;;
 			-h|--help) usage; exit 0 ;;
 			--) shift; break ;;

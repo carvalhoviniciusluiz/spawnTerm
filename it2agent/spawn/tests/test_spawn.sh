@@ -171,16 +171,26 @@ case "$noguide_out" in
 esac
 
 echo
-echo "--- 6d. delivery via boot tmpfile, not inline typing (bug P1) ---"
-# The AppleScript must type a SHORT line that sources a /tmp boot file, never the
-# whole multi-line script (which corrupts long lines in an interactive shell).
+echo "--- 6d. delivery: boot LAUNCHED as the tab command, not typed (bugs P1 + #74) ---"
+# P1: the (possibly long) script lives in a /tmp boot file, never inlined. #74:
+# the boot is LAUNCHED as the new tab's `command` (create tab/window with default
+# profile command "..."), NEVER typed via `write text`. Launching as the session
+# command runs it in exactly the created tab with nothing fed to a line editor,
+# which kills the zle/typeahead delivery race that dropped identity on some tabs.
 deliv_out="$(sh "$SPAWN" --role worker --task "build #10" --dry-run -- python3 /a/very/long/path/to/some/agent_shim.py --sock /tmp/x.sock --result /tmp/y.log --timeout 30)"
 assert_contains "plan documents /tmp boot-file delivery" "boot file" "$deliv_out"
 as_only="$(printf '%s\n' "$deliv_out" | awk '/AppleScript that WOULD run:/{f=1;next} f')"
-assert_contains "AppleScript sources the boot file" "write text \". '/tmp/it2agent-boot." "$as_only"
+assert_contains "#74: tab created WITH a command"          "with default profile command " "$as_only"
+assert_contains "#74: command sources the /tmp boot file"  ". /tmp/it2agent-boot."          "$as_only"
+# #74: absolutely no `write text` (that was the racy path). No assert_absent here,
+# so check by hand.
+case "$as_only" in
+	*"write text"*) red "#74: AppleScript still types via write text (racy path not removed)" ;;
+	*)              green "#74: no write text — launched as the tab command" ;;
+esac
 case "$as_only" in
 	*agent_shim.py*) red "P1: long command leaked into the AppleScript (should be in the boot file)" ;;
-	*)               green "P1: long command stays in the boot file, not the typed line" ;;
+	*)               green "P1: long command stays in the boot file, not the launched line" ;;
 esac
 
 echo
