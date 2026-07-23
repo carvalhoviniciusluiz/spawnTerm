@@ -393,6 +393,28 @@ run_tmux_path() {
 	add_emit "color $(shq "$STATUS")"
 	add_emit "badge"
 
+	# NATIVE tab status (OSC 21337) — cooperate with iTerm2's native tab-status
+	# / Cockpit channel (#89, follow-up to #87/#88). We ALWAYS append this line;
+	# it is NOT gated here. it2agent-emit ccstatus SELF-GATES on
+	# agent.native_status, so when that flag is OFF (the default) the call emits
+	# nothing and exits 0 — a no-op that leaves the current behavior unchanged.
+	# The detail mirrors the badge's own role/task composition (role · task, else
+	# whichever is set); when both are empty we omit --detail. --no-gate rides
+	# through via GATE_ARG exactly like the identity emits above.
+	CCSTATUS_DETAIL=""
+	if [ -n "$ROLE" ] && [ -n "$TASK" ]; then
+		CCSTATUS_DETAIL="$ROLE · $TASK"
+	elif [ -n "$ROLE" ]; then
+		CCSTATUS_DETAIL="$ROLE"
+	elif [ -n "$TASK" ]; then
+		CCSTATUS_DETAIL="$TASK"
+	fi
+	if [ -n "$CCSTATUS_DETAIL" ]; then
+		add_emit "ccstatus $(shq "$STATUS") --detail $(shq "$CCSTATUS_DETAIL")"
+	else
+		add_emit "ccstatus $(shq "$STATUS")"
+	fi
+
 	# -- the inner session script (cd -> per-agent env exports -> identity emits ->
 	#    exec agent). We do NOT inline this into the tmux `command`: the emits are
 	#    already shell-quoted, so inlining would force a SECOND layer of
