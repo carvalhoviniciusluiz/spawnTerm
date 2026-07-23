@@ -169,15 +169,20 @@ def build_handoff_op(payload: dict, verification_status: str) -> dict[str, Any]:
 def build_completed_send_op(payload: dict) -> dict[str, Any]:
     """Optional ``send`` on completion so a lead that died/resumed still sees it.
 
-    Durable + replayed-until-acked via the broker mailbox.
+    Durable + replayed-until-acked via the broker mailbox. Carries an idempotency
+    ``key`` of ``task:<id>:completed`` (#95) so a retried TaskCompleted — the hook
+    re-firing after a partial failure — dedups on ``(lead, key)`` at the broker
+    instead of enqueuing a duplicate "completed" notification. Harmless against an
+    older broker that predates the key (it is simply ignored server-side).
     """
-    key = team_key(payload.get("session_id"))
+    tkey = team_key(payload.get("session_id"))
     task = extract_task(payload)
     return {
         "op": "send",
         "to": "lead",
-        "from": key,
+        "from": tkey,
         "body": f"task:{task['id']} completed",
+        "key": f"task:{task['id']}:completed",
     }
 
 
