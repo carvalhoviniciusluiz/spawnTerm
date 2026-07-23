@@ -35,9 +35,11 @@
 # IT2AGENT_FORCE=1 (forwarded as --no-gate into the new session).
 #
 # Opening a tab with a working dir + running a command on stock iTerm2 (no Tier
-# 1 daemon) is done with osascript against iTerm2's scripting model, which
-# exposes `create tab with default profile`, `current session`, and
-# `write text`. The AppleScript is built as a here-doc below.
+# 1 daemon) is done with osascript against iTerm2's scripting model. The boot
+# script is launched DIRECTLY as the new session's `command` (create tab with
+# default profile command "..."), never typed via `write text` — that typing was
+# the source of the #74 delivery race. The AppleScript is built as a here-doc
+# below.
 #
 # No external deps beyond osascript (macOS built-in) and it2agent-emit.
 set -eu
@@ -445,28 +447,46 @@ else
 	chmod 600 "$BOOT"
 	printf '%s\n' "$SESSION_SCRIPT" > "$BOOT"
 fi
-# The single short line typed into the new session: POSIX `.` sources the boot
-# script in the new shell; the trailing rm self-cleans once it returns (a
-# leftover in /tmp is harmless if the tab is closed mid-command).
-DELIVERY_LINE=". $(shq "$BOOT"); rm -f $(shq "$BOOT")"
+# --- delivery: launch the boot as the session's COMMAND (bug #74 fix) --------
+# The P1 fix above stopped TYPING the long script (it now lives in the boot
+# file). But the boot file was still reached by TYPING a short `. <file>` line
+# into the new tab's interactive shell via AppleScript `write text`. That typing
+# is racy two ways (proven live in AC1, #74): (A) `write text` targeted
+# `current session of targetWindow`, re-read after `create tab`, so back-to-back
+# spawns could write into the wrong/not-yet-current session; (B) it fed the new
+# shell's line editor (zle) before it was ready, so stray typeahead/autosuggest
+# bytes got prepended (observed `que.`/`foi ` → `command not found`), the source
+# failed, and identity was never stamped.
+#
+# Fix: do NOT type anything. Launch the boot directly as the session's PROGRAM
+# via iTerm2's `command` parameter on `create tab`/`create window`. The command
+# runs in exactly the tab we create (so (A) is gone by construction — there is
+# no `current session` lookup and no `write text`), and nothing ever touches a
+# line editor (so (B) is gone). The program is a login shell that sources the
+# boot file, self-removes it, then re-execs an interactive login shell so the
+# tab stays usable after the agent command returns (matching the old UX).
+LAUNCH_SHELL="${SHELL:-/bin/sh}"
+case "$LAUNCH_SHELL" in
+	*[!A-Za-z0-9/._-]*) LAUNCH_SHELL="/bin/sh" ;;  # refuse odd $SHELL paths
+esac
+# The boot path is a mktemp slug (/tmp/it2agent-boot.XXXXXX): no spaces/quotes,
+# safe to embed unquoted. Keep the inner free of single quotes so the outer
+# single-quote wrap (shq) stays clean.
+BOOT_INNER=". $BOOT; rm -f $BOOT; exec $LAUNCH_SHELL -l"
+LAUNCH_CMD="$LAUNCH_SHELL -lc $(shq "$BOOT_INNER")"
 
 # --- assemble the AppleScript -------------------------------------------------
-# iTerm2 scripting model: create a tab in the current window (or a new window if
-# none is open), then write the short delivery line into `current session`. We
-# escape it for embedding in an AppleScript double-quoted literal.
-AS_BODY="$(as_esc "$DELIVERY_LINE")"
+# Create a tab in the current window (or a new window if none is open) whose
+# `command` IS the launch line. No `write text`, no `current session`.
+AS_BODY="$(as_esc "$LAUNCH_CMD")"
 build_applescript() {
 	cat <<APPLESCRIPT
 tell application "iTerm2"
 	if (count of windows) = 0 then
-		set targetWindow to (create window with default profile)
+		create window with default profile command "${AS_BODY}"
 	else
-		set targetWindow to current window
-		tell targetWindow to create tab with default profile
+		tell current window to create tab with default profile command "${AS_BODY}"
 	end if
-	tell current session of targetWindow
-		write text "${AS_BODY}"
-	end tell
 end tell
 APPLESCRIPT
 }
@@ -486,7 +506,7 @@ if [ "$DRYRUN" = "1" ]; then
 		printf '  isolation    : off (plain $PWD inheritance, = #10)\n'
 	fi
 	printf '  guide header : %s\n' "$([ "$NO_GUIDE" = 1 ] && echo 'off (--no-guide)' || echo 'on (run: it2agent help)')"
-	printf '  delivery     : the script below is written to a /tmp boot file and the new session runs `. <file>; rm -f <file>` (not typed inline)\n'
+	printf '  delivery     : the script below is written to a /tmp boot file; the tab is created with `command` = `%s -lc ". <file>; rm -f <file>; exec %s -l"` (launched directly, NOT typed into a shell — no zle race, #74)\n' "$LAUNCH_SHELL" "$LAUNCH_SHELL"
 	if [ "$ISOLATION_ON" = "1" ]; then
 		printf '\n  worktree isolation plan (from it2agent-worktree):\n'
 		printf '%s\n' "$ISOLATION_PLAN" | sed 's/^/    /'
@@ -500,4 +520,6 @@ fi
 
 # --- execute ------------------------------------------------------------------
 command -v osascript >/dev/null 2>&1 || die "osascript not found (this wrapper requires macOS/iTerm2)"
-printf '%s\n' "$APPLESCRIPT_TEXT" | osascript -
+# Discard osascript's stdout (it echoes the created-tab reference); keep stderr
+# so real AppleScript/iTerm errors still surface.
+printf '%s\n' "$APPLESCRIPT_TEXT" | osascript - >/dev/null

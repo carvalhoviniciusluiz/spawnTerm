@@ -110,27 +110,32 @@ assert_contains "isolation off in this config"      "isolation    : off"        
 assert_absent   "no IT2AGENT_PORT export (iso off)" "IT2AGENT_PORT"                    "$on_out"
 
 echo
-echo "--- 4. the inner tmux script is ONE physical line (write text safe) ---"
-# Extract the inner session script line from the dry-run and assert it has no
-# embedded newline (iTerm2's `write text` would otherwise submit it piecemeal).
-inner="$(printf '%s\n' "$on_out" | awk '/inner session script/{getline; print; exit}')"
-assert_contains "inner script present"        "cd '"          "$inner"
-assert_contains "inner script is ;-joined"    " ; "           "$inner"
-assert_contains "inner script exec's command" "exec 'claude'" "$inner"
+echo "--- 4. the inner boot script (cd -> env -> emits -> self-rm -> exec) ---"
+# The inner script now lives in a /tmp boot file that the tmux command sources
+# (#74 fix keeps the launched `command` single-quote clean). The dry-run prints
+# the boot script's content: a ;-joined pipeline that cds, emits identity, self-
+# removes, then exec's the agent.
+inner="$(printf '%s\n' "$on_out" | awk '/boot script/{getline; print; exit}')"
+assert_contains "boot script present"                 "cd '"                          "$inner"
+assert_contains "boot script is ;-joined"             " ; "                           "$inner"
+assert_contains "boot script self-removes before exec" "rm -f /tmp/it2agent-tmuxboot." "$inner"
+assert_contains "boot script exec's command"          "exec 'claude'"                 "$inner"
 
 echo
 echo "--- 5. emitted tmux argv round-trips: -lc payload is a SINGLE arg ---"
 # Eval the printed `tmux -CC ...` line with `tmux` shimmed to a shell function
 # that records its arg count. Correct quoting => tmux sees exactly 8 args:
-#   -CC new-session -A -s <name> <shell> -lc <inner-as-ONE-arg>
+#   -CC new-session -A -s <name> <shell> -lc <source-line-as-ONE-arg>
+# The payload is now the SHORT `. <bootfile>` source line (the real script lives
+# in the boot file, asserted in test 4) — this is what keeps iTerm2's `command`
+# string single-quote clean (#74).
 tmux_line="$(printf '%s\n' "$on_out" | awk '/tmux -CC command/{getline; sub(/^[[:space:]]+/,""); print; exit}')"
 assert_contains "extracted a tmux -CC line" "tmux -CC new-session" "$tmux_line"
 TMUX_ARGC=0; TMUX_LAST=""
 tmux() { TMUX_ARGC=$#; eval "TMUX_LAST=\${$#}"; }
 eval "$tmux_line"
 assert_eq  "tmux received exactly 8 argv (payload not split)" "8" "$TMUX_ARGC"
-assert_contains "the -lc payload arg carries the whole script" "exec 'claude' '--resume'" "$TMUX_LAST"
-assert_contains "the -lc payload arg also carries the cd"      "cd '"                     "$TMUX_LAST"
+assert_contains "the -lc payload sources the boot file (one arg)" ". /tmp/it2agent-tmuxboot." "$TMUX_LAST"
 unset -f tmux
 
 echo
@@ -142,6 +147,35 @@ assert_contains "--no-gate reported as bypass"   "bypassed via --no-gate" "$noga
 # IT2AGENT_FORCE=1 also bypasses.
 force_out="$(IT2AGENT_FORCE=1 sh "$TMUX_BIN" spawn --role worker --task t --dry-run -- claude)"
 assert_contains "IT2AGENT_FORCE=1 forces the tmux path" "tmux -CC new-session" "$force_out"
+
+echo
+echo "--- 6b. isolation gate (#75): --no-gate / IT2AGENT_FORCE must NOT force it ---"
+# The tmux gate (agent.tmux) and the worktree-isolation gate are SEPARATE. The P2
+# bug (#75) was that --no-gate / IT2AGENT_FORCE opened BOTH — silently creating a
+# worktree. Fix mirrors it2agent-spawn (fae9d53e7): isolation is opt-in via its
+# own flag agent.worktree_isolation or an explicit --force-isolation /
+# IT2AGENT_FORCE_ISOLATION. We keep the tmux gate ON (flag) so run_tmux_path runs,
+# and probe the isolation gate independently. --dry-run => no worktree is created.
+sh "$FLAG" enable agent.tmux >/dev/null
+sh "$FLAG" disable agent.worktree_isolation >/dev/null 2>&1
+iso_plain="$(cd "$TMUX_DIR" && sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --dry-run -- claude)"
+assert_contains "isolation OFF by default (flag off)"              "isolation    : off" "$iso_plain"
+iso_nogate="$(cd "$TMUX_DIR" && sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --no-gate --dry-run -- claude)"
+assert_contains "--no-gate does NOT force isolation (P2/#75)"      "isolation    : off" "$iso_nogate"
+case "$iso_nogate" in
+	*IT2AGENT_PORT*) red "P2: --no-gate leaked an IT2AGENT_PORT export (should be #10)" ;;
+	*)                green "P2: --no-gate injects no IT2AGENT_PORT" ;;
+esac
+iso_force_env="$(cd "$TMUX_DIR" && IT2AGENT_FORCE=1 sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --dry-run -- claude)"
+assert_contains "IT2AGENT_FORCE does NOT force isolation (P2/#75)" "isolation    : off" "$iso_force_env"
+# Explicit opt-in turns it ON even with the flag OFF.
+iso_on="$(cd "$TMUX_DIR" && sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --force-isolation --dry-run -- claude)"
+assert_contains "isolation ON via --force-isolation"              "isolation    : ON (--force-isolation)" "$iso_on"
+assert_contains "ON: exports IT2AGENT_PORT into the tmux session" "export IT2AGENT_PORT="                  "$iso_on"
+iso_on_env="$(cd "$TMUX_DIR" && IT2AGENT_FORCE_ISOLATION=1 sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --dry-run -- claude)"
+assert_contains "IT2AGENT_FORCE_ISOLATION=1 turns isolation ON"   "isolation    : ON"  "$iso_on_env"
+# Restore the tmux gate to OFF for any later assertions.
+sh "$FLAG" disable agent.tmux >/dev/null 2>&1
 
 echo
 echo "--- 7. attach (recovery) ---"
