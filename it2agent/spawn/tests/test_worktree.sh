@@ -188,6 +188,72 @@ assert_exit "cleanup removes a MERGED/unchanged worktree (exit 0)" 0 \
 git -C "$REPO" show-ref --verify --quiet "refs/heads/$cbr" && red "merged branch not deleted" || green "merged branch deleted"
 
 echo
+echo "--- 7. port lease (TOCTOU fix): contention, stale reclaim, release ---"
+# Exercise the lease-aware allocation deterministically: pretend every TCP port
+# is free (IT2AGENT_NO_TCP_PROBE) so only lease STATE governs allocation. On
+# macOS there is no flock, so this also covers the atomic-mkdir lock fallback.
+LEASES="$TMP/wt/.leases"
+export IT2AGENT_NO_TCP_PROBE=1
+
+# plant_lease <port> <pid> <worktree>: forge a foreign lease record.
+plant_lease() {
+	mkdir -p "$LEASES"
+	{
+		printf 'id=%s\n' planted
+		printf 'repo=%s\n' "$REPO"
+		printf 'pid=%s\n' "$2"
+		printf 'epoch=%s\n' 0
+		printf 'worktree=%s\n' "$3"
+	} > "$LEASES/$1.lease"
+}
+
+# 7a. NO CONTENTION -> deterministic port preserved + a lease is written.
+rm -rf "$LEASES"
+det_nc="$(val port "$(sh "$WT" plan --repo "$REPO" --id lease_nc --role worker)")"
+out_nc="$(sh "$WT" create --repo "$REPO" --id lease_nc --role worker --no-gate)"
+assert_eq "no contention: create returns the deterministic port" "$det_nc" "$(val port "$out_nc")"
+[ -f "$LEASES/$det_nc.lease" ] && green "lease file written for the deterministic port ($det_nc)" || red "no lease written for $det_nc"
+
+# 7b. CONTENTION (two concurrent allocs, same repo) -> second must ADVANCE.
+# Simulate the first spawn by planting a LIVE, non-stale lease on the second
+# agent's deterministic port; its own create must then pick a different port.
+det_cc="$(val port "$(sh "$WT" plan --repo "$REPO" --id lease_cc --role worker)")"
+livewt="$TMP/livewt"; mkdir -p "$livewt"
+plant_lease "$det_cc" "$$" "$livewt"
+out_cc="$(sh "$WT" create --repo "$REPO" --id lease_cc --role worker --no-gate)"
+got_cc="$(val port "$out_cc")"
+if [ "$got_cc" != "$det_cc" ]; then green "contention: second alloc advances off the leased port ($det_cc -> $got_cc)"; else red "contention: collided on $det_cc"; fi
+if [ "$got_cc" -ge 41000 ] && [ "$got_cc" -le 41999 ]; then green "advanced port stays in range ($got_cc)"; else red "advanced port out of range ($got_cc)"; fi
+[ -f "$LEASES/$got_cc.lease" ] && green "a second lease is written at the advanced port" || red "no lease at advanced port $got_cc"
+[ -f "$LEASES/$det_cc.lease" ] && green "the pre-existing (live) lease is left intact" || red "pre-existing lease was clobbered"
+
+# 7c. STALE by DEAD PID -> reclaimed, deterministic port reused. Worktree in the
+# planted lease EXISTS, so only the dead-pid rule can trigger the reclaim.
+( : ) & deadpid=$!; wait "$deadpid" 2>/dev/null || true
+det_dp="$(val port "$(sh "$WT" plan --repo "$REPO" --id lease_deadpid --role worker)")"
+deadwt="$TMP/deadpidwt"; mkdir -p "$deadwt"
+plant_lease "$det_dp" "$deadpid" "$deadwt"
+out_dp="$(sh "$WT" create --repo "$REPO" --id lease_deadpid --role worker --no-gate)"
+assert_eq "stale (dead pid) reclaimed: deterministic port reused" "$det_dp" "$(val port "$out_dp")"
+if grep -q "pid=$deadpid" "$LEASES/$det_dp.lease" 2>/dev/null; then red "dead-pid lease not reclaimed"; else green "dead-pid lease reclaimed + rewritten by the new owner"; fi
+
+# 7d. STALE by MISSING WORKTREE -> reclaimed. Pid is LIVE ($$), so only the
+# missing-worktree rule can trigger the reclaim.
+det_nw="$(val port "$(sh "$WT" plan --repo "$REPO" --id lease_nowt --role worker)")"
+plant_lease "$det_nw" "$$" "$TMP/does-not-exist-$$"
+out_nw="$(sh "$WT" create --repo "$REPO" --id lease_nowt --role worker --no-gate)"
+assert_eq "stale (missing worktree) reclaimed: deterministic port reused" "$det_nw" "$(val port "$out_nw")"
+
+# 7e. TEARDOWN releases the lease so the port returns to the pool.
+c_td="$(sh "$WT" create --repo "$REPO" --id lease_teardown --role worker --no-gate)"
+port_td="$(val port "$c_td")"
+[ -f "$LEASES/$port_td.lease" ] && green "lease present after create ($port_td)" || red "no lease after create"
+sh "$WT" cleanup --repo "$REPO" --id lease_teardown --role worker --base main --no-gate >/dev/null 2>&1
+[ -f "$LEASES/$port_td.lease" ] && red "lease leaked after cleanup" || green "lease released on teardown"
+
+unset IT2AGENT_NO_TCP_PROBE
+
+echo
 echo "--- 6. exit codes / usage ---"
 assert_exit "--help exits 0"                 0 sh "$WT" --help
 assert_exit "missing command exits 2"        2 sh "$WT"
