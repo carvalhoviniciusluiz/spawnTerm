@@ -2576,7 +2576,7 @@ ITERM_WEAKLY_REFERENCEABLE
     _wrapper = [[TextViewWrapper alloc] initWithFrame:NSMakeRect(0, 0, aSize.width, aSize.height)];
 
     _textview = [[PTYTextView alloc] initWithFrame:NSMakeRect(0,
-                                                              [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins],
+                                                              [iTermPreferences topBottomMargins],
                                                               aSize.width,
                                                               aSize.height)];
     _textview.colorMap = _screen.colorMap;
@@ -2603,7 +2603,8 @@ ITERM_WEAKLY_REFERENCEABLE
     [self setTransparencyAffectsOnlyDefaultBackgroundColor:[[_profile objectForKey:KEY_TRANSPARENCY_AFFECTS_ONLY_DEFAULT_BACKGROUND_COLOR] boolValue]];
 
     [_wrapper addSubview:_textview];
-    [_textview setFrame:NSMakeRect(0, [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins], aSize.width, aSize.height - [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins])];
+    const int vmargin = [iTermPreferences topBottomMargins];
+    [_textview setFrame:NSMakeRect(0, vmargin, aSize.width, aSize.height - vmargin)];
 
     // assign terminal and task objects
     // Pause token execution in case the caller needs to modify terminal state before it starts running.
@@ -2630,8 +2631,8 @@ ITERM_WEAKLY_REFERENCEABLE
                                                       scrollerStyle:_view.scrollview.scrollerStyle
                                                          rightExtra:self.desiredRightExtra];
 
-        int width = (contentSize.width - [iTermPreferences intForKey:kPreferenceKeySideMargins]*2) / [_textview charWidth];
-        int height = (contentSize.height - [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins]*2) / [_textview lineHeight];
+        int width = (contentSize.width - [iTermPreferences sideMargins]*2) / [_textview charWidth];
+        int height = (contentSize.height - [iTermPreferences topBottomMargins]*2) / [_textview lineHeight];
         [_screen destructivelySetScreenWidth:width
                                       height:height
                                 mutableState:mutableState];
@@ -2841,7 +2842,7 @@ ITERM_WEAKLY_REFERENCEABLE
         if (_view.showBottomStatusBar) {
             result -= iTermGetStatusBarHeight();
         }
-        result -= [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins] * 2;
+        result -= [iTermPreferences topBottomMargins] * 2;
         int iLineHeight = [_textview lineHeight];
         if (iLineHeight == 0) {
             return 0;
@@ -2852,7 +2853,7 @@ ITERM_WEAKLY_REFERENCEABLE
         }
         return result;
     } else {
-        result -= [iTermPreferences intForKey:kPreferenceKeySideMargins] * 2;
+        result -= [iTermPreferences sideMargins] * 2;
         int iCharWidth = [_textview charWidth];
         if (iCharWidth == 0) {
             return 0;
@@ -4798,8 +4799,8 @@ static void PTYSessionRunWriteCompletion(void (^completion)(void)) {
 }
 
 - (NSSize)idealScrollViewSizeWithStyle:(NSScrollerStyle)scrollerStyle {
-    NSSize innerSize = NSMakeSize([_screen width] * [_textview charWidth] + [iTermPreferences intForKey:kPreferenceKeySideMargins] * 2,
-                                  [_screen height] * [_textview lineHeight] + [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins] * 2);
+    NSSize innerSize = NSMakeSize([_screen width] * [_textview charWidth] + [iTermPreferences sideMargins] * 2,
+                                  [_screen height] * [_textview lineHeight] + [iTermPreferences topBottomMargins] * 2);
     BOOL hasScrollbar = [[_delegate realParentWindow] scrollbarShouldBeVisible];
     NSSize outerSize =
     [PTYScrollView frameSizeForContentSize:innerSize
@@ -6439,7 +6440,7 @@ static void PTYSessionRunWriteCompletion(void (^completion)(void)) {
     _backgroundImageMode = mode;
     [_backgroundDrawingHelper invalidate];
     [self setBackgroundImagePath:_backgroundImageSwiftyString.swiftyString];
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         self.view.imageMode = mode;
     }
 }
@@ -6496,7 +6497,7 @@ static void PTYSessionRunWriteCompletion(void (^completion)(void)) {
     if (!self.effectiveBackgroundImage) {
         return 0;
     }
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         return self.desiredBlend;
     } else {
         if (self.backgroundImage) {
@@ -6512,7 +6513,7 @@ static void PTYSessionRunWriteCompletion(void (^completion)(void)) {
 }
 
 - (iTermImageWrapper *)effectiveBackgroundImage {
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         return _backgroundImage;
     } else {
         return [self.delegate sessionBackgroundImage];
@@ -6520,7 +6521,7 @@ static void PTYSessionRunWriteCompletion(void (^completion)(void)) {
 }
 
 - (iTermBackgroundImageMode)effectiveBackgroundImageMode {
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         return _backgroundImageMode;
     } else {
         return [self.delegate sessionBackgroundImageMode];
@@ -6532,7 +6533,7 @@ static void PTYSessionRunWriteCompletion(void (^completion)(void)) {
 }
 
 - (void)updateViewBackgroundImage {
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         DLog(@"Update per-pane background image");
         self.view.image = _backgroundImage;
         [self.view setImageMode:_backgroundImageMode];
@@ -8779,7 +8780,7 @@ extendResultsAcrossSoftBoundaries:(BOOL)extendResultsAcrossSoftBoundaries {
 #pragma mark iTermMetalGlueDelegate
 
 - (iTermImageWrapper *)metalGlueBackgroundImage {
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         return _backgroundImage;
     } else {
         return [self.delegate sessionBackgroundImage];
@@ -8787,7 +8788,7 @@ extendResultsAcrossSoftBoundaries:(BOOL)extendResultsAcrossSoftBoundaries {
 }
 
 - (iTermBackgroundImageMode)metalGlueBackgroundImageMode {
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         return _backgroundImageMode;
     } else {
         return [self.delegate sessionBackgroundImageMode];
@@ -12629,7 +12630,7 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
         _backgroundDrawingHelper = [[iTermBackgroundDrawingHelper alloc] init];
         _backgroundDrawingHelper.delegate = self;
     }
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         NSRect contentRect = self.view.contentRect;
         if (contentRect.size.width == 0 ||
             contentRect.size.height == 0) {
@@ -12645,7 +12646,7 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
     } else {
         NSView *container = [self.delegate sessionContainerView:self];
         NSRect visibleRect = view.enclosingScrollView.documentVisibleRect;
-        const CGFloat marginHeight = [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins];
+        const CGFloat marginHeight = [iTermPreferences topBottomMargins];
         visibleRect.origin.y -= marginHeight;
         NSRect clippedDirtyRect = NSIntersectionRect(dirtyRect, visibleRect);
         NSRect windowVisibleRect = [self.view insetRect:container.bounds
@@ -12663,7 +12664,7 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
 }
 
 - (CGRect)textViewRelativeFrame {
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         return CGRectMake(0, 0, 1, 1);
     }
     NSRect viewRect;
@@ -12681,7 +12682,7 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
 }
 
 - (CGRect)textViewContainerRect {
-    if ([iTermPreferences boolForKey:kPreferenceKeyPerPaneBackgroundImage]) {
+    if ([iTermPreferences perPaneBackgroundImage]) {
         return self.view.frame;
     }
     NSView *container = [self.delegate sessionContainerView:self];
@@ -13812,7 +13813,7 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
     const CGFloat desiredHeight = _textview.desiredHeight;
     if (fabs(desiredHeight - NSHeight(frame)) >= 0.5) {
         // Update the wrapper's size, which in turn updates textview's size.
-        frame.size.height = desiredHeight + [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins];  // The wrapper is always larger by VMARGIN.
+        frame.size.height = desiredHeight + [iTermPreferences topBottomMargins];  // The wrapper is always larger by VMARGIN.
         _wrapper.frame = [self safeFrameForWrapperViewFrame:frame];
 
         AccLog(@"Post notification: row count changed (PTYSession)");
@@ -14506,8 +14507,8 @@ typedef NS_ENUM(NSUInteger, PTYSessionTmuxReport) {
         minX = hasWindow ? windowedRange.columnWindow.location : 0;
         maxX = hasWindow ? (windowedRange.columnWindow.location + windowedRange.columnWindow.length) : _screen.width;
     }
-    const int hmargin = [iTermPreferences intForKey:kPreferenceKeySideMargins];
-    const int vmargin = [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins];
+    const int hmargin = [iTermPreferences sideMargins];
+    const int vmargin = [iTermPreferences topBottomMargins];
     const int rows = visibleRange.end.y - visibleRange.start.y + 1;
     const VT100GridSize gridSize = VT100GridSizeMake(maxX - minX, rows);
     const CGFloat cellWidth = [_textview charWidth];
@@ -20571,7 +20572,7 @@ static const NSTimeInterval PTYSessionFocusReportBellSquelchTimeIntervalThreshol
 }
 
 - (BOOL)sessionViewShouldDimOnlyText {
-    return [iTermPreferences boolForKey:kPreferenceKeyDimOnlyText];
+    return [iTermPreferences dimOnlyText];
 }
 
 - (NSColor *)sessionViewTabColor {
@@ -20613,7 +20614,7 @@ static const NSTimeInterval PTYSessionFocusReportBellSquelchTimeIntervalThreshol
 }
 
 - (CGFloat)sessionViewDesiredHeightOfDocumentView {
-    return _textview.desiredHeight + [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins];
+    return _textview.desiredHeight + [iTermPreferences topBottomMargins];
 }
 
 - (BOOL)sessionViewShouldUpdateSubviewsFramesAutomatically {
@@ -20712,7 +20713,7 @@ static const NSTimeInterval PTYSessionFocusReportBellSquelchTimeIntervalThreshol
     const int cy = [self.screen cursorY];
     const CGFloat charWidth = [self.textview charWidth];
     const CGFloat lineHeight = [self.textview lineHeight];
-    NSPoint p = NSMakePoint([iTermPreferences doubleForKey:kPreferenceKeySideMargins] + cx * charWidth,
+    NSPoint p = NSMakePoint([iTermPreferences sideMargins] + cx * charWidth,
                             ([self.screen numberOfLines] - [self.screen height] + cy) * lineHeight);
     const NSPoint origin = [self.textview.window pointToScreenCoords:[self.textview convertPoint:p toView:nil]];
     return NSMakeRect(origin.x,
@@ -23346,7 +23347,7 @@ static const NSTimeInterval PTYSessionFocusReportBellSquelchTimeIntervalThreshol
 
     newFrame.origin.y += newFrame.size.height;
     const CGFloat maxWidth = _view.bounds.size.width - newFrame.origin.x * 2;
-    const CGFloat vmargin = [iTermPreferences intForKey:kPreferenceKeyTopBottomMargins];
+    const CGFloat vmargin = [iTermPreferences topBottomMargins];
     const NSSize paneSize = self.view.frame.size;
     CGFloat y = 0;
     CGFloat width = 0;
