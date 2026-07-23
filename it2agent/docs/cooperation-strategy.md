@@ -301,7 +301,8 @@ Each major decision is validated against academic/industry sources. Verdict = **
 6. **Re-scope review (#14) to the durable notify leg** · **DOCUMENTED (#100):** keep `review_notify` broker
    send; drop overlay ambitions; docs point at native Code Review · *dep: broker* (Path 3).
 7. **#13 runtime-isolation upgrade (dynamic vs canonical port, assign strategies, optional container)** ·
-   level up worktree isolation to the state-of-the-art model · *dep: none* (R3).
+   level up worktree isolation to the state-of-the-art model · *dep: none* (R3). **Full design +
+   phased sub-backlog: `it2agent/docs/runtime-isolation-upgrade.md`.**
 8. **(verify) native tab-status session-var → registry (inbound status)** · optional one-way read of the
    native tab-status session var via the daemon's existing Python-API path; skip Cockpit/provenance ·
    *dep: daemon* (Path 2). Low priority.
