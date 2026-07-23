@@ -31,7 +31,7 @@ PREFIX = "agent."
 # and drives both `list` output and the deterministic file serializer. This
 # MUST stay in sync with KNOWN_FLAGS in the sibling `it2agent-flag` shell tool.
 KNOWN_FLAGS: dict[str, str] = {
-    "status_board": "Tier 0 escape-code status board (agents emit state; iTerm2 paints it).",
+    "status_board": "LEGACY (duplicates native Cockpit): Tier 0 SetUserVar/tab-color status board. Prefer agent.native_status (OSC 21337 -> native tab status + Cockpit, #88). Kept OFF for compatibility.",
     "worktree_isolation": "Per-agent git-worktree + $PORT isolation.",
     "messaging": "Cross-tab agent-to-agent messaging via the broker.",
     "inbox": "Durable per-agent inbox surface.",

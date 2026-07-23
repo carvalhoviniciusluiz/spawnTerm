@@ -175,6 +175,12 @@ parses and logs each ingested envelope but does **not** route. Turn it on with
 > undeliverable; if it is present the text is injected and may be lost if the
 > agent is busy. The durable inbox + ack path is **Tier 2 (#4)** — precisely the
 > gap the #37 bridge below closes when the broker is up.
+>
+> **Re-scope (#100):** the **canonical** messaging path is the durable broker
+> (Tier 2). This in-memory router is kept **only** as the degraded fallback the
+> #37 bridge selects when the broker is unreachable — not a standalone feature.
+> No API or default change; `agent.messaging` still means "route via the broker
+> when it is up, in-memory only when it is not." See `native-vs-it2agent.md`.
 
 ## Daemon↔broker bridge (Tier 2.4, #37)
 
@@ -240,6 +246,13 @@ vars read at register time. This is independent of the messaging relay — the
 registry reflects liveness even with messaging off.
 
 ## Agent dashboard (status-bar component, #29)
+
+> **Re-scope note (#100):** this status-bar dashboard **duplicates the native
+> Cockpit** and its OSC 21337 tab status. Do **not** invest in it as a second
+> board — point users at the native **tab status + Cockpit** (fed by
+> `it2agent-emit ccstatus`, gate `agent.native_status`, #88). It stays behind
+> `agent.status_board` (default OFF); no code removal, no default change. See
+> `native-vs-it2agent.md` (Path 3 / #29).
 
 The daemon can register a custom **iTerm2 status-bar component** that shows, per
 session, the agent's role + lifecycle status (+ task if it fits), e.g.

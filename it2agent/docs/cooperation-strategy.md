@@ -160,6 +160,12 @@ Cockpit. Gate `agent.native_status`. Keep. **Acceptance:** spawn an agent, run
 
 ## COOPERATION PATH 3 — Defer to native; retire/re-scope our duplicates (safe deprecation)
 
+**Status: DECIDED / documented (#100, part of #1).** The deprecation/re-scope notes below have landed as
+**docs + flag-description text only** — no capability code was removed and no default changed (everything
+here was already OFF by default). The flag description for `agent.status_board` now reads LEGACY and
+points at `agent.native_status`; the router (#28), dashboard (#29), and review (#14) module docs carry
+the re-scope notes. Actual code deletion, if ever, is a later, separate step.
+
 Everything below is behind an OFF-by-default feature flag already, so deprecation is low-risk: flip the
 flag off, leave the code importable for one release, document the native replacement, then delete.
 
@@ -287,12 +293,13 @@ Each major decision is validated against academic/industry sources. Verdict = **
    client-side and never acks · *dep: #1 for `team_tasks`; standalone for `read_messages`* (N1, N2, R2).
 3. **`send` idempotency key + dedup** · optional key on broker `send`; drop duplicate enqueues; keeps
    at-least-once sound under retries · *dep: broker* (R2).
-4. **Retire #28 standalone router; document broker-only messaging** · router remains only as the bridge's
-   degraded fallback; docs + flag semantics, no API break · *dep: none* (Path 3).
-5. **Re-scope status board (#7/#8/#29) to feed OSC 21337 / Cockpit** · mark SetUserVar color/badge board
-   + #29 dashboard legacy/OFF; keep emit `ccstatus` (#88) · *dep: #88 (done)* (Path 3).
-6. **Re-scope review (#14) to the durable notify leg** · keep `review_notify` broker send; drop overlay
-   ambitions; docs point at native Code Review · *dep: broker* (Path 3).
+4. **Retire #28 standalone router; document broker-only messaging** · **DOCUMENTED (#100):** router
+   remains only as the bridge's degraded fallback; docs + flag semantics, no API break · *dep: none* (Path 3).
+5. **Re-scope status board (#7/#8/#29) to feed OSC 21337 / Cockpit** · **DOCUMENTED (#100):** `status_board`
+   flag description marked LEGACY → `agent.native_status`; #29 dashboard doc points at native Cockpit; keep
+   emit `ccstatus` (#88); all still OFF, no default change · *dep: #88 (done)* (Path 3).
+6. **Re-scope review (#14) to the durable notify leg** · **DOCUMENTED (#100):** keep `review_notify` broker
+   send; drop overlay ambitions; docs point at native Code Review · *dep: broker* (Path 3).
 7. **#13 runtime-isolation upgrade (dynamic vs canonical port, assign strategies, optional container)** ·
    level up worktree isolation to the state-of-the-art model · *dep: none* (R3).
 8. **(verify) native tab-status session-var → registry (inbound status)** · optional one-way read of the
