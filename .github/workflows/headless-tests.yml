@@ -62,8 +62,12 @@ jobs:
           # LaunchServices to register the bundle (no launch, no window server).
           sudo xattr -dr com.apple.quarantine /Applications/iTerm.app || true
           /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f /Applications/iTerm.app || true
-          # Probe terminology resolution and publish the result to later steps.
-          if osacompile -o /dev/null -e 'tell application "iTerm2" to return name' >/dev/null 2>&1; then
+          # Probe with an iTerm2-SPECIFIC command (the terms the suites actually
+          # use), not a standard property like `name` — iTerm2 supplies that
+          # terminology dynamically, which needs the app running (a GUI/window
+          # server the hosted runner lacks), so a `name`-only probe gives a
+          # false positive. Publish the result to later steps.
+          if osacompile -o /dev/null -e 'tell application "iTerm2" to create window with default profile' >/dev/null 2>&1; then
             echo "osacompile resolves iTerm2 terminology"
           else
             echo "::warning::osacompile cannot resolve iTerm2 terminology on this runner; skipping the spawn/tmux AppleScript-syntax checks (they run on a dev Mac / self-hosted runner with iTerm2)"
