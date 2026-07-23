@@ -64,6 +64,7 @@ def _fail_no_iterm2(exc: Exception) -> int:
     print("VALIDATION COULD NOT RUN — this needs a LIVE iTerm2 + Python API.", file=sys.stderr)
     print(f"  reason: {exc}", file=sys.stderr)
     print("  fix:    Preferences > General > Magic > Enable Python API; pip3 install iterm2", file=sys.stderr)
+    print("  check:  defaults read com.googlecode.iterm2 EnableAPIServer  (must be 1; the server must be ON, not just the module installed)", file=sys.stderr)
     print("  then:   start a `tmux -CC` session and re-run (see this file's header).", file=sys.stderr)
     print("NOTHING was validated; no results are fabricated.", file=sys.stderr)
     return 3
