@@ -127,6 +127,11 @@ Worktree + port/namespace isolation (issue #13 — gated OFF by default):
                    isolation is ON and --id is omitted.
   --base-port <n>  Base of the per-agent port range (default 41000).
   --no-probe       Skip free-port probing; use the deterministic port as-is.
+  --force-isolation
+                   Force worktree/port isolation ON even when the
+                   "agent.worktree_isolation" flag is OFF (explicit opt-in for
+                   local testing). Distinct from --no-gate, which never enables
+                   isolation.
   When the flag "agent.worktree_isolation" is ON, the new tab opens in a
   per-agent git WORKTREE on its own branch (not plain \$PWD), and the session
   exports \$IT2AGENT_PORT / \$IT2AGENT_NS / \$IT2AGENT_WORKTREE /
@@ -139,8 +144,8 @@ Capability guide:
   --no-guide       Do not inject the guide header.
 
 Other:
-  --no-gate        Forward --no-gate to every emit call AND bypass the
-                   worktree-isolation gate (local testing).
+  --no-gate        Forward --no-gate to every emit call (local testing). Does
+                   NOT enable worktree isolation — use --force-isolation for that.
   --dry-run        Print the resolved cwd, the isolation plan (if ON), the emit
                    calls, the command, and the AppleScript that WOULD run —
                    execute nothing.
@@ -148,8 +153,9 @@ Other:
 
 Environment:
   IT2AGENT_SPAWN_DRYRUN=1   Same as --dry-run.
-  IT2AGENT_FORCE=1          Forwarded as --no-gate into the emit calls and
-                             bypasses the worktree-isolation gate.
+  IT2AGENT_FORCE=1          Forwarded as --no-gate into the emit calls. Does NOT
+                             enable worktree isolation.
+  IT2AGENT_FORCE_ISOLATION=1  Same as --force-isolation.
 
 Gating: the identity emits self-gate on the feature flag
 "agent.status_board" (via it2agent-emit -> it2agent-flag). Worktree/port
@@ -176,12 +182,19 @@ BASE_PORT=""
 NO_PROBE=0
 NO_GATE=0
 NO_GUIDE=0
+FORCE_ISOLATION=0
 DRYRUN="${IT2AGENT_SPAWN_DRYRUN:-0}"
 [ "$DRYRUN" = "1" ] || DRYRUN=0
 
-# IT2AGENT_FORCE=1 in the spawner's env means "bypass the gate": forward it.
+# IT2AGENT_FORCE=1 in the spawner's env means "bypass the emit gate": forward it.
+# NOTE (bug P2 fix): this bypasses ONLY the identity-emit gate. It does NOT turn
+# on worktree isolation — that is opt-in via the agent.worktree_isolation flag or
+# the explicit --force-isolation / IT2AGENT_FORCE_ISOLATION=1.
 if [ "${IT2AGENT_FORCE:-}" = "1" ]; then
 	NO_GATE=1
+fi
+if [ "${IT2AGENT_FORCE_ISOLATION:-}" = "1" ]; then
+	FORCE_ISOLATION=1
 fi
 
 while [ $# -gt 0 ]; do
@@ -222,6 +235,8 @@ while [ $# -gt 0 ]; do
 			NO_PROBE=1; shift ;;
 		--no-gate)
 			NO_GATE=1; shift ;;
+		--force-isolation)
+			FORCE_ISOLATION=1; shift ;;
 		--no-guide)
 			NO_GUIDE=1; shift ;;
 		--dry-run)
@@ -300,12 +315,17 @@ done
 ISOLATION_EXPORTS=""   # export lines injected into the session (empty when OFF)
 ISOLATION_PLAN=""      # human-readable plan captured from the helper (dry-run)
 ISOLATION_ON=0
+ISO_FORCED=0           # 1 when isolation is ON via --force-isolation (flag bypassed)
 
-# Gate: same fail-safe / --no-gate / IT2AGENT_FORCE convention as emit. OFF if
-# the flag helper is missing or the flag is not true.
+# Gate (bug P2 fix): worktree isolation is opt-in via its OWN flag. Unlike the
+# emit gate, it is NOT bypassed by --no-gate / IT2AGENT_FORCE — those only affect
+# the identity emits. Isolation turns ON only when agent.worktree_isolation is
+# true, or when explicitly forced with --force-isolation / IT2AGENT_FORCE_ISOLATION.
 iso_gate_open() {
-	[ "${IT2AGENT_FORCE:-}" = "1" ] && return 0
-	[ "$NO_GATE" = "1" ] && return 0
+	if [ "$FORCE_ISOLATION" = "1" ]; then
+		ISO_FORCED=1
+		return 0
+	fi
 	fl="$(find_flag 2>/dev/null)" || return 1
 	if "$fl" agent.worktree_isolation >/dev/null 2>&1; then
 		return 0
@@ -332,14 +352,16 @@ if iso_gate_open; then
 		fi
 	fi
 
-	# Assemble the helper args. Forward --no-gate when we bypassed our own gate,
-	# so the helper (which also self-gates) runs in lockstep with this wrapper.
+	# Assemble the helper args. The worktree helper also self-gates on
+	# agent.worktree_isolation, so when isolation is ON via the flag it opens on
+	# its own. Only when we FORCED isolation past an OFF flag (--force-isolation)
+	# do we forward --no-gate, so the helper runs in lockstep with this wrapper.
 	set -- create --repo "$REPO_ROOT" --id "$iso_id"
 	[ -n "$ROLE" ] && set -- "$@" --role "$ROLE"
 	[ -n "$TASK" ] && set -- "$@" --task "$TASK"
 	[ -n "$BASE_PORT" ] && set -- "$@" --base-port "$BASE_PORT"
 	[ "$NO_PROBE" = "1" ] && set -- "$@" --no-probe
-	[ "$NO_GATE" = "1" ] && set -- "$@" --no-gate
+	[ "$ISO_FORCED" = "1" ] && set -- "$@" --no-gate
 	[ "$DRYRUN" = "1" ] && set -- "$@" --dry-run
 
 	if ! ISOLATION_PLAN="$("$WT" "$@")"; then
@@ -407,11 +429,32 @@ fi
 SESSION_SCRIPT="$CD_CMD
 ${ISOLATION_EXPORTS}${EMIT_CMDS}${GUIDE_CMD}${RUN_CMD}"
 
+# --- deliver via a tmpfile, NOT by typing the whole script (bug P1 fix) -------
+# Typing a long multi-line script into the new tab's interactive shell via
+# AppleScript `write text` corrupts it two ways: long single lines get mangled by
+# zle/syntax-highlight/autosuggest, and long/UTF-8 payloads mangle the
+# shell->AppleScript->iTerm transport. So we write the script to a short-path
+# tmpfile and type ONE short line that sources it with `.` and self-removes.
+# (Technique proven in the operator's ~/bin iTerm helpers; reimplemented here to
+# stay self-contained.) The new tab is a separate login shell, so the file must
+# live on a shared filesystem — /tmp (kept short to keep the typed line short).
+if [ "$DRYRUN" = "1" ]; then
+	BOOT="/tmp/it2agent-boot.XXXXXX"   # placeholder path; no file created in dry-run
+else
+	BOOT="$(mktemp /tmp/it2agent-boot.XXXXXX)" || die "could not create boot tmpfile under /tmp"
+	chmod 600 "$BOOT"
+	printf '%s\n' "$SESSION_SCRIPT" > "$BOOT"
+fi
+# The single short line typed into the new session: POSIX `.` sources the boot
+# script in the new shell; the trailing rm self-cleans once it returns (a
+# leftover in /tmp is harmless if the tab is closed mid-command).
+DELIVERY_LINE=". $(shq "$BOOT"); rm -f $(shq "$BOOT")"
+
 # --- assemble the AppleScript -------------------------------------------------
 # iTerm2 scripting model: create a tab in the current window (or a new window if
-# none is open), then write each line into `current session`. We escape the
-# script for embedding in an AppleScript double-quoted literal.
-AS_BODY="$(as_esc "$SESSION_SCRIPT")"
+# none is open), then write the short delivery line into `current session`. We
+# escape it for embedding in an AppleScript double-quoted literal.
+AS_BODY="$(as_esc "$DELIVERY_LINE")"
 build_applescript() {
 	cat <<APPLESCRIPT
 tell application "iTerm2"
@@ -436,13 +479,19 @@ if [ "$DRYRUN" = "1" ]; then
 	printf '  resolved cwd : %s\n' "$CWD"
 	printf '  emit helper  : %s\n' "$EMIT"
 	printf '  gate bypass  : %s\n' "$([ "$NO_GATE" = 1 ] && echo 'yes (--no-gate forwarded)' || echo 'no (emit self-gates on agent.status_board)')"
-	printf '  isolation    : %s\n' "$([ "$ISOLATION_ON" = 1 ] && echo 'ON (agent.worktree_isolation) — per-agent worktree + port' || echo 'off (plain $PWD inheritance, = #10)')"
+	if [ "$ISOLATION_ON" = "1" ]; then
+		iso_why="$([ "$ISO_FORCED" = 1 ] && echo '--force-isolation' || echo 'agent.worktree_isolation')"
+		printf '  isolation    : ON (%s) — per-agent worktree + port\n' "$iso_why"
+	else
+		printf '  isolation    : off (plain $PWD inheritance, = #10)\n'
+	fi
 	printf '  guide header : %s\n' "$([ "$NO_GUIDE" = 1 ] && echo 'off (--no-guide)' || echo 'on (run: it2agent help)')"
+	printf '  delivery     : the script below is written to a /tmp boot file and the new session runs `. <file>; rm -f <file>` (not typed inline)\n'
 	if [ "$ISOLATION_ON" = "1" ]; then
 		printf '\n  worktree isolation plan (from it2agent-worktree):\n'
 		printf '%s\n' "$ISOLATION_PLAN" | sed 's/^/    /'
 	fi
-	printf '\n  commands written into the new session:\n'
+	printf '\n  commands written into the new session (the boot file):\n'
 	printf '%s\n' "$SESSION_SCRIPT" | sed 's/^/    /'
 	printf '\n  AppleScript that WOULD run:\n'
 	printf '%s\n' "$APPLESCRIPT_TEXT" | sed 's/^/    /'

@@ -42,6 +42,12 @@ assert_exit() {
 	if [ "$got" = "$want" ]; then green "$label (exit $got)"; else red "$label (want $want, got $got)"; fi
 }
 
+# Hermetic: isolate the feature-flag config so these tests never depend on the
+# operator's real ~/.config/it2agent/config.toml. An empty config => every flag
+# defaults OFF, which is what the gate/isolation assertions below assume.
+IT2AGENT_CONFIG="$(mktemp -d)/config.toml"
+export IT2AGENT_CONFIG
+
 echo "=== it2agent-spawn behavior tests (dry-run) ==="
 echo "spawn: $SPAWN"
 echo "emit : $EMIT"
@@ -127,10 +133,16 @@ case "$iso_off" in
 	*IT2AGENT_PORT*) red "gate OFF leaked a IT2AGENT_PORT export (should be #10)" ;;
 	*)                green "gate OFF injects no IT2AGENT_PORT (plain cwd inheritance)" ;;
 esac
-# Gate bypassed with --no-gate: isolation turns ON -> worktree cwd + port/ns
-# exports appear. Requires a git repo, so run from the spawn dir (in this repo).
-iso_on="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --task iso --no-gate --dry-run -- claude)"
-assert_contains "isolation ON via --no-gate"          "isolation    : ON"                 "$iso_on"
+# Bug P2 fix: --no-gate / IT2AGENT_FORCE bypass ONLY the emit gate; they must
+# NOT enable worktree isolation. With the flag OFF, isolation stays OFF.
+iso_nogate="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --no-gate --dry-run -- true)"
+assert_contains "--no-gate does NOT force isolation (P2)" "isolation    : off" "$iso_nogate"
+iso_force_env="$(cd "$SPAWN_DIR" && IT2AGENT_FORCE=1 sh "$SPAWN" --id 13 --role worker --dry-run -- true)"
+assert_contains "IT2AGENT_FORCE does NOT force isolation (P2)" "isolation    : off" "$iso_force_env"
+# Explicit opt-in: --force-isolation turns isolation ON even with the flag OFF ->
+# worktree cwd + port/ns exports appear. Requires a git repo, so run from the spawn dir.
+iso_on="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --task iso --force-isolation --dry-run -- claude)"
+assert_contains "isolation ON via --force-isolation"  "isolation    : ON"                 "$iso_on"
 assert_contains "ON: new tab cds into the worktree"   "worktree=" "$iso_on"
 assert_contains "ON: exports IT2AGENT_PORT"          "export IT2AGENT_PORT="            "$iso_on"
 assert_contains "ON: exports IT2AGENT_NS"            "export IT2AGENT_NS="              "$iso_on"
@@ -156,6 +168,19 @@ assert_contains "--no-guide reflected in plan" "guide header : off (--no-guide)"
 case "$noguide_out" in
 	*"run: it2agent help"*) red "--no-guide still injected the guide header" ;;
 	*)                       green "--no-guide omits the guide header" ;;
+esac
+
+echo
+echo "--- 6d. delivery via boot tmpfile, not inline typing (bug P1) ---"
+# The AppleScript must type a SHORT line that sources a /tmp boot file, never the
+# whole multi-line script (which corrupts long lines in an interactive shell).
+deliv_out="$(sh "$SPAWN" --role worker --task "build #10" --dry-run -- python3 /a/very/long/path/to/some/agent_shim.py --sock /tmp/x.sock --result /tmp/y.log --timeout 30)"
+assert_contains "plan documents /tmp boot-file delivery" "boot file" "$deliv_out"
+as_only="$(printf '%s\n' "$deliv_out" | awk '/AppleScript that WOULD run:/{f=1;next} f')"
+assert_contains "AppleScript sources the boot file" "write text \". '/tmp/it2agent-boot." "$as_only"
+case "$as_only" in
+	*agent_shim.py*) red "P1: long command leaked into the AppleScript (should be in the boot file)" ;;
+	*)               green "P1: long command stays in the boot file, not the typed line" ;;
 esac
 
 echo
