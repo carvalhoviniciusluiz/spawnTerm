@@ -49,6 +49,7 @@ Booleans only, under a single `[features]` table, with **quoted, fully-namespace
 "agent.menubar" = false
 "agent.codex_status" = false
 "agent.native_status" = false
+"agent.team_bridge" = false
 ```
 
 The format is deliberately constrained so a pure-shell parser and Python's `tomllib`
@@ -83,6 +84,7 @@ Namespaced keys are `agent.<capability>`. All default **`false`**.
 | `agent.menubar` | Menu bar status item with a live count badge of busy AI agents, adapted from gnachman/iTerm2#670. |
 | `agent.codex_status` | Show Codex CLI working/idle activity in the tab status by decoding the braille-spinner title prefix, adapted from gnachman/iTerm2#673. |
 | `agent.native_status` | Emit native OSC 21337 tab-status so agents show in iTerm2's native tab status + Cockpit (`it2agent-emit ccstatus`). |
+| `agent.team_bridge` | Mirror Claude Code agent-teams task/coordination state into the durable broker so it survives lead-session death (`it2agent-team-hook`). |
 
 ## Default-OFF rule
 

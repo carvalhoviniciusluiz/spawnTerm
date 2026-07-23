@@ -1,0 +1,22 @@
+#!/usr/bin/env sh
+# it2agent-team-hook — durable OBSERVER bridge for Claude Code agent teams (#92).
+#
+# it2agent COOPERATION PATH 1 (the moat). scope:external-tooling — mirrors
+# Claude Code agent-teams task/coordination state into the durable it2agent
+# broker so it survives lead-session death. Never modifies iTerm2 source.
+#
+# This is a thin launcher: the whole CLI is the Python module
+# it2agent_team_hook.py (which talks to the broker via the in-repo BrokerClient).
+# Like it2agent-inbox, there is no shell parity twin — the bridge speaks the
+# broker's socket protocol through the shared Python client.
+#
+# CRITICAL: this is an OBSERVER. On the event path (created/completed/idle) it
+# ALWAYS exits 0 and NEVER writes to stdout, because a Claude Code hook that
+# exits 2 or emits stdout would BLOCK / steer the team. The Python module
+# guarantees this; this wrapper's only job is exec.
+#
+# Gating: the event path is a no-op unless the feature flag agent.team_bridge is
+# ON (default OFF). Bypass with --no-gate or IT2AGENT_FORCE=1. install/uninstall
+# are operator opt-in and edit ~/.claude/settings.json. See it2agent/team/README.md.
+here=$(cd "$(dirname "$0")" && pwd)
+exec python3 "$here/it2agent_team_hook.py" "$@"

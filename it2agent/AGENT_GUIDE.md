@@ -152,6 +152,30 @@ backed by the daemon + broker. Enable `agent.mcp` to start the server.
 | `list_agents` | list the registry, filter by role/alive/capability |
 | `help` | return this guide's text (also via `resources/read` + `initialize` instructions) |
 
+## Team bridge — mirror Claude Code agent teams into the durable broker (`agent.team_bridge`)
+
+`it2agent-team-hook` is a durable OBSERVER of Claude Code's experimental agent
+teams. Registered as three hooks, it shadows team state into the broker so it
+survives lead-session death; the mirror is then visible through the MCP tools
+above (`list_agents` filtered by `capability:"team:session-<sid8>"`, `status`,
+`handoff_history`). It is an observer: it never steers the team and always exits
+0. The team key is derived from `session_id` as `team:session-<first 8 chars>`.
+
+| Event | Broker op |
+| --- | --- |
+| `TeammateIdle` | `register` the teammate (role = `agent_type`, capability `team:session-<sid8>`) |
+| `TaskCreated` | `handoff_put` `goal:task:<id>`, `verification_status:pending` |
+| `TaskCompleted` | `handoff_put` `verification_status:completed` + `send` to `lead` |
+
+Opt-in install (edits `~/.claude/settings.json`; deep-merge, never overwrites):
+
+```
+it2agent-flag enable agent.team_bridge      # gate (default OFF)
+it2agent-team-hook install                  # add the 3 hooks
+export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1   # you enable this yourself
+it2agent-team-hook uninstall                # remove only our entries
+```
+
 ## Toggle any capability
 
 ```

@@ -36,7 +36,8 @@ static NSString *const iTermAgentFlagEnvironmentVariable = @"IT2AGENT_FLAG";
                          @"claude_statusbar",
                          @"menubar",
                          @"codex_status",
-                         @"native_status" ];
+                         @"native_status",
+                         @"team_bridge" ];
     });
     return identifiers;
 }
@@ -71,7 +72,8 @@ static NSString *const iTermAgentFlagEnvironmentVariable = @"IT2AGENT_FLAG";
                    @"claude_statusbar": @"Claude Code Status Bar",
                    @"menubar": @"AI Agent Menu Bar",
                    @"codex_status": @"Codex Tab Status",
-                   @"native_status": @"Native Tab Status" };
+                   @"native_status": @"Native Tab Status",
+                   @"team_bridge": @"Team Bridge" };
     });
     NSString *name = names[capability];
     if (name) {
