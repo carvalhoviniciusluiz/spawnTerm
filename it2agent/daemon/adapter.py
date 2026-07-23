@@ -64,6 +64,28 @@ def build_spawn_customizations(plan):
     return customizations
 
 
+def build_launch_command(cwd: str, command: str) -> str:
+    """The program string to run as the spawned session (#85).
+
+    iTerm2 IGNORES a profile's custom directory when a ``command`` override is
+    supplied to ``async_create_tab`` / ``Window.async_create`` — the custom dir
+    only applies to the profile's own login command (proven live: the same
+    customization opens in the custom dir WITHOUT a command, but in ``$HOME``
+    WITH one). ``build_spawn_customizations`` still sets the custom dir (correct
+    for the no-command path and harmless here), but to actually land the agent in
+    ``cwd`` we bake the ``cd`` into the command and ``exec`` the agent in it,
+    mirroring the AppleScript ``it2agent-spawn`` path. ``exec`` keeps the agent as
+    the session's foreground process (no wrapper shell lingering). When ``cwd`` is
+    empty the command is returned unchanged. Pure: no iterm2 import.
+    """
+    if not cwd:
+        return command
+    import shlex
+
+    inner = f"cd {shlex.quote(cwd)} && exec {command}"
+    return f"/bin/sh -lc {shlex.quote(inner)}"
+
+
 class DaemonAdapter:
     """Bridges iTerm2 monitors to the pure registry. Owns no logic of its own
     beyond translation and logging."""
@@ -368,18 +390,21 @@ class DaemonAdapter:
 
         app = await iterm2.async_get_app(self.connection)
         customizations = build_spawn_customizations(plan)
+        # #85: a `command` override defeats the profile's custom dir, so bake the
+        # cd into the command to actually land the agent in plan.cwd.
+        launch_command = build_launch_command(plan.cwd, command)
 
         window = app.current_terminal_window
         if window is None:
             window = await iterm2.Window.async_create(
                 self.connection,
-                command=command,
+                command=launch_command,
                 profile_customizations=customizations,
             )
             session = window.current_tab.current_session
         else:
             tab = await window.async_create_tab(
-                command=command,
+                command=launch_command,
                 profile_customizations=customizations,
             )
             session = tab.current_session

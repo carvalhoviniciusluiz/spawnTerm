@@ -24,7 +24,9 @@ deferred to a live run with the Python API on.
 
 import importlib.util
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -76,6 +78,40 @@ class TestBuildSpawnCustomizations(unittest.TestCase):
         plan = spawn.SpawnPlan(cwd="")
         customizations = adapter.build_spawn_customizations(plan)
         self.assertIsNotNone(customizations)
+
+
+class TestBuildLaunchCommand(unittest.TestCase):
+    """#85: a `command` override defeats the profile's custom dir, so spawn_agent
+    bakes the cd into the command. build_launch_command is pure (no iterm2), so
+    these run everywhere. The end-to-end cases prove the quoting: executed by a
+    shell, the launch string must cd into cwd before exec'ing the agent."""
+
+    def test_no_cwd_returns_command_unchanged(self):
+        self.assertEqual(adapter.build_launch_command("", "/bin/zsh"), "/bin/zsh")
+
+    def test_cwd_wraps_with_cd_and_exec(self):
+        out = adapter.build_launch_command("/work/proj", "claude --resume")
+        self.assertTrue(out.startswith("/bin/sh -lc "))
+        self.assertIn("cd ", out)
+        self.assertIn("exec claude --resume", out)
+
+    def test_runs_in_cwd_end_to_end(self):
+        # `pwd` stands in for the agent; the launch string must print cwd.
+        # `sh -c "$launch"` emulates iTerm tokenizing `command` into argv.
+        real = os.path.realpath(tempfile.mkdtemp())
+        launch = adapter.build_launch_command(real, "pwd")
+        out = subprocess.run(
+            ["/bin/sh", "-c", launch], capture_output=True, text=True
+        ).stdout.strip()
+        self.assertEqual(os.path.realpath(out), real)
+
+    def test_cwd_with_spaces_is_quoted(self):
+        real = os.path.realpath(tempfile.mkdtemp(prefix="has space "))
+        launch = adapter.build_launch_command(real, "pwd")
+        out = subprocess.run(
+            ["/bin/sh", "-c", launch], capture_output=True, text=True
+        ).stdout.strip()
+        self.assertEqual(os.path.realpath(out), real)
 
 
 if __name__ == "__main__":
