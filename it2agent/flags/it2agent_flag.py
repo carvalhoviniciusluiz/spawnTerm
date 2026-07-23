@@ -29,24 +29,26 @@ PREFIX = "agent."
 
 # Seeded schema: capability name -> one-line description. Order is canonical
 # and drives both `list` output and the deterministic file serializer. This
-# MUST stay in sync with KNOWN_FLAGS in the sibling `it2agent-flag` shell tool.
+# MUST stay in sync with KNOWN_FLAGS in the sibling `it2agent-flag` shell tool
+# (names only there) and with descriptionForCapability: in
+# sources/Settings/iTermAgentCapabilities.m (which mirrors these UI blurbs).
 KNOWN_FLAGS: dict[str, str] = {
-    "status_board": "LEGACY (duplicates native Cockpit): Tier 0 SetUserVar/tab-color status board. Prefer agent.native_status (OSC 21337 -> native tab status + Cockpit, #88). Kept OFF for compatibility.",
-    "worktree_isolation": "Per-agent git-worktree + $PORT isolation.",
-    "messaging": "Cross-tab agent-to-agent messaging via the broker.",
-    "inbox": "Durable per-agent inbox surface.",
-    "cost_dashboard": "Token/cost dashboard.",
-    "janitor": "Background cleanup of stale worktrees/sessions.",
-    "mcp": "MCP surface exposing it2agent to agents.",
-    "daemon": "Tier 1 iTerm2 Python API orchestration daemon (registry + ingest/idle).",
-    "broker": "Tier 2 external broker (durable sqlite mailbox/registry/state/ack over a unix socket).",
-    "review": "Per-agent diff/review surface (show worktree diff vs base; approve->merge / request-changes).",
-    "tmux": "Tier 3 tmux -CC persistence: spawn agents inside a native tmux -CC session so windows/agents survive quit/crash and can be reattached.",
-    "claude_statusbar": "Claude Code session status aggregator status-bar component (Waiting/Working/Idle across all windows).",
-    "menubar": "Menu bar status item showing a live count badge of busy AI agents (imported from gnachman/iTerm2#670).",
-    "codex_status": "Show Codex CLI working/idle activity in the tab status by decoding the braille-spinner title prefix (imported from gnachman/iTerm2#673).",
-    "native_status": "Emit native OSC 21337 tab-status so agents show in iTerm2's native tab status + Cockpit (it2agent-emit ccstatus).",
-    "team_bridge": "Mirror Claude Code agent-teams task/coordination state into the durable broker so it survives lead-session death (it2agent-team-hook).",
+    "status_board": "Legacy: colors the tab and sets a status variable to show agent state. Prefer Native Tab Status.",
+    "worktree_isolation": "Gives each agent its own git worktree and a dedicated port so they never collide.",
+    "messaging": "Lets agents send messages to each other across tabs through the broker.",
+    "inbox": "Keeps a durable per-agent inbox so messages survive restarts.",
+    "cost_dashboard": "Shows a running dashboard of token usage and cost.",
+    "janitor": "Cleans up stale worktrees and sessions in the background.",
+    "mcp": "Exposes it2agent to your agents as an MCP server.",
+    "daemon": "Runs the orchestration daemon that tracks agents and their idle/busy state.",
+    "broker": "Runs the durable broker - mailbox, registry, and state over a local socket.",
+    "review": "Adds a per-agent diff view to approve-and-merge or request changes on a worktree.",
+    "tmux": "Runs agents inside a tmux -CC session so they survive a quit or crash and can reattach.",
+    "claude_statusbar": "Adds a status-bar item summarizing Claude Code sessions (Waiting, Working, Idle).",
+    "menubar": "Adds a menu-bar item with a live count of busy AI agents.",
+    "codex_status": "Shows Codex CLI working/idle activity in the tab status.",
+    "native_status": "Publishes agent state to iTerm2's native tab status and Cockpit via OSC 21337.",
+    "team_bridge": "Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session's death.",
 }
 
 

@@ -90,6 +90,34 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
     return [capability capitalizedString];
 }
 
++ (NSString *)descriptionForCapability:(NSString *)capability {
+    // One-line, plain-language blurbs shown next to each checkbox. MUST stay in
+    // sync with the KNOWN_FLAGS descriptions in it2agent-flag / it2agent_flag.py
+    // (the shell twin carries names only, so only the Python map mirrors these).
+    static NSDictionary<NSString *, NSString *> *descriptions;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        descriptions = @{ @"status_board": @"Legacy: colors the tab and sets a status variable to show agent state. Prefer Native Tab Status.",
+                          @"worktree_isolation": @"Gives each agent its own git worktree and a dedicated port so they never collide.",
+                          @"messaging": @"Lets agents send messages to each other across tabs through the broker.",
+                          @"inbox": @"Keeps a durable per-agent inbox so messages survive restarts.",
+                          @"cost_dashboard": @"Shows a running dashboard of token usage and cost.",
+                          @"janitor": @"Cleans up stale worktrees and sessions in the background.",
+                          @"mcp": @"Exposes it2agent to your agents as an MCP server.",
+                          @"daemon": @"Runs the orchestration daemon that tracks agents and their idle/busy state.",
+                          @"broker": @"Runs the durable broker — mailbox, registry, and state over a local socket.",
+                          @"review": @"Adds a per-agent diff view to approve-and-merge or request changes on a worktree.",
+                          @"tmux": @"Runs agents inside a tmux -CC session so they survive a quit or crash and can reattach.",
+                          @"claude_statusbar": @"Adds a status-bar item summarizing Claude Code sessions (Waiting, Working, Idle).",
+                          @"menubar": @"Adds a menu-bar item with a live count of busy AI agents.",
+                          @"codex_status": @"Shows Codex CLI working/idle activity in the tab status.",
+                          @"native_status": @"Publishes agent state to iTerm2’s native tab status and Cockpit via OSC 21337.",
+                          @"team_bridge": @"Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session’s death." };
+    });
+    NSString *description = descriptions[capability];
+    return description ?: @"";
+}
+
 #pragma mark - Executable resolution
 
 // Per-tool cache of resolved executable paths (NSNull for a cached negative
