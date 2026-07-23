@@ -67,6 +67,13 @@ FLAG_KEY="agent.worktree_isolation"
 # singleton lease is only touched when this is ON (or bypassed via --no-gate /
 # IT2AGENT_FORCE). It is independent of the worktree_isolation gate above.
 FLAG_KEY_CANONICAL="agent.canonical_port"
+# Sub-flags for the service-isolation features (--isolate, items 5+6). Each is
+# fail-safe OFF and independent: the corresponding export is only emitted when
+# its flag is ON (or bypassed via --no-gate / IT2AGENT_FORCE). ENV-ONLY — we
+# export variables the project's own compose/DB tooling reads; we never run
+# docker or connect to Postgres.
+FLAG_KEY_ISOLATE_DOCKER="agent.isolate_docker"
+FLAG_KEY_ISOLATE_DB="agent.isolate_db"
 
 DEFAULT_BASE_PORT=41000
 DEFAULT_SPAN=1000
@@ -654,6 +661,93 @@ release_canonical_for_worktree() {
 	release_alloc_lock
 }
 
+# --- service isolation (items 5+6): --isolate docker|db, ENV-ONLY ------------
+# Turn the advisory $IT2AGENT_NS prefix into concrete, opt-in service isolation
+# by EXPORTING variables the project's own tooling already honors. This layer
+# never invokes docker and never connects to Postgres — it only hands over
+# names; the repo's compose files / migrations / connection code read them.
+#
+#   --isolate docker   (flag agent.isolate_docker): export
+#                        COMPOSE_PROJECT_NAME=$IT2AGENT_NS so `docker compose`
+#                        gets a per-agent project (isolated networks/volumes/
+#                        containers) and stacks don't collide between agents.
+#   --isolate db        (flag agent.isolate_db, default schema mode): export
+#                        IT2AGENT_DB_SCHEMA=$IT2AGENT_NS plus
+#                        PGOPTIONS='-c search_path=$IT2AGENT_NS' so the project's
+#                        connection lands in a per-agent Postgres schema.
+#   --isolate db=database: export IT2AGENT_DB_NAME=$IT2AGENT_NS instead (a
+#                        per-agent database name rather than a schema).
+#   --isolate namespace: REJECTED on macOS (parse-time error) — Linux
+#                        netns/cgroups have no host-process equivalent on Darwin;
+#                        the only real network-namespace isolation here is a
+#                        container, i.e. --isolate docker.
+#
+# Each mode self-gates on its OWN flag (fail-safe OFF, bypassable with --no-gate
+# / IT2AGENT_FORCE for tests). A requested mode whose flag is OFF emits nothing.
+# The wrappers turn every emitted `env_<NAME>=<value>` line into an
+# `export <NAME>=<value>` in the new session.
+
+# parse_isolate: fold the accumulated ISOLATE_CSV into ISOLATE_DOCKER /
+# ISOLATE_DB / DB_MODE. Rejects `namespace` and unknown tokens with a clear
+# message. Pure; safe to call for every command so the rejection is consistent.
+parse_isolate() {
+	[ -n "$ISOLATE_CSV" ] || return 0
+	_oldifs="$IFS"; IFS=','
+	for _tok in $ISOLATE_CSV; do
+		case "$_tok" in
+			"") ;;
+			docker) ISOLATE_DOCKER=1 ;;
+			db|db=schema) ISOLATE_DB=1; DB_MODE="schema" ;;
+			db=database) ISOLATE_DB=1; DB_MODE="database" ;;
+			namespace|namespace=*)
+				IFS="$_oldifs"
+				die "--isolate namespace is not supported on macOS (host processes have no network namespaces); use --isolate docker for container-level isolation" ;;
+			*)
+				IFS="$_oldifs"
+				die "--isolate: unknown mode '$_tok' (valid: docker, db, db=schema, db=database)" ;;
+		esac
+	done
+	IFS="$_oldifs"
+}
+
+isolate_docker_gate_open() {
+	[ "${IT2AGENT_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	flag="$(find_flag 2>/dev/null)" || return 1
+	"$flag" "$FLAG_KEY_ISOLATE_DOCKER" >/dev/null 2>&1
+}
+
+isolate_db_gate_open() {
+	[ "${IT2AGENT_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	flag="$(find_flag 2>/dev/null)" || return 1
+	"$flag" "$FLAG_KEY_ISOLATE_DB" >/dev/null 2>&1
+}
+
+# print_isolate: emit the ENV-ONLY isolation exports for each REQUESTED mode
+# whose flag gate is open, as `env_<NAME>=<value>` lines, plus a single
+# `isolate=<modes>` summary of what was actually activated. NAMESPACE must
+# already be set (compute_plan). No side effects: nothing is run or created.
+print_isolate() {
+	_active=""
+	if [ "$ISOLATE_DOCKER" = "1" ] && isolate_docker_gate_open; then
+		printf 'env_COMPOSE_PROJECT_NAME=%s\n' "$NAMESPACE"
+		_active="${_active:+$_active,}docker"
+	fi
+	if [ "$ISOLATE_DB" = "1" ] && isolate_db_gate_open; then
+		if [ "$DB_MODE" = "database" ]; then
+			printf 'env_IT2AGENT_DB_NAME=%s\n' "$NAMESPACE"
+			_active="${_active:+$_active,}db=database"
+		else
+			printf 'env_IT2AGENT_DB_SCHEMA=%s\n' "$NAMESPACE"
+			printf 'env_PGOPTIONS=-c search_path=%s\n' "$NAMESPACE"
+			_active="${_active:+$_active,}db=schema"
+		fi
+	fi
+	[ -n "$_active" ] && printf 'isolate=%s\n' "$_active"
+	return 0
+}
+
 # --- git plan runner ---------------------------------------------------------
 # run_git: in dry-run print the command; otherwise execute it (git chatter to
 # stderr so stdout stays machine-parseable).
@@ -700,6 +794,11 @@ cmd_create() {
 			print_canonical
 		fi
 	fi
+
+	# Service isolation (items 5+6): ENV-ONLY, each mode self-gated on its own
+	# flag. Emits env_<NAME>=<value> lines the wrappers export. Works the same in
+	# --dry-run (there are no side effects to withhold — nothing is run/created).
+	print_isolate
 
 	if [ "$DRYRUN" = "1" ]; then
 		printf 'would-run: mkdir -p %s\n' "$(dirname "$WORKTREE")"
@@ -1075,6 +1174,17 @@ Common options:
                      IT2AGENT_PORT_<UPPER> (first is also the bare IT2AGENT_PORT,
                      back-compat). Each name folds into its hash so they don't
                      collide. Without --ports there is exactly one port, as in #13.
+  --isolate <list>   Opt-in service isolation, ENV-ONLY (comma list, repeatable):
+                       docker       export COMPOSE_PROJECT_NAME=\$IT2AGENT_NS
+                                    (gated on $FLAG_KEY_ISOLATE_DOCKER).
+                       db|db=schema export IT2AGENT_DB_SCHEMA=\$IT2AGENT_NS plus
+                                    PGOPTIONS='-c search_path=\$IT2AGENT_NS'
+                                    (gated on $FLAG_KEY_ISOLATE_DB).
+                       db=database  export IT2AGENT_DB_NAME=\$IT2AGENT_NS instead.
+                       namespace    REJECTED on macOS (use docker).
+                     We only EXPORT names the project's own compose/DB tooling
+                     reads; we never run docker or connect to Postgres. Each
+                     mode emits nothing unless its flag is ON (or --no-gate).
 
 create options:
   --dry-run          Print the git commands + allocation; execute nothing.
@@ -1148,6 +1258,10 @@ PORTS_CSV=""
 CANONICAL_BASE="$DEFAULT_CANONICAL_BASE"
 CANONICAL_TAKEOVER=0
 RELEASE=0
+ISOLATE_CSV=""       # accumulated --isolate list(s); parsed by parse_isolate
+ISOLATE_DOCKER=0
+ISOLATE_DB=0
+DB_MODE="schema"     # schema (default) | database, set by --isolate db=...
 
 [ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
 
@@ -1169,6 +1283,8 @@ while [ $# -gt 0 ]; do
 		--base=*) BASE_REF="${1#--base=}"; shift ;;
 		--ports) [ $# -ge 2 ] || die "--ports requires a comma-separated list"; PORTS_CSV="$2"; shift 2 ;;
 		--ports=*) PORTS_CSV="${1#--ports=}"; shift ;;
+		--isolate) [ $# -ge 2 ] || die "--isolate requires a list (docker, db, db=schema, db=database)"; ISOLATE_CSV="${ISOLATE_CSV:+$ISOLATE_CSV,}$2"; shift 2 ;;
+		--isolate=*) ISOLATE_CSV="${ISOLATE_CSV:+$ISOLATE_CSV,}${1#--isolate=}"; shift ;;
 		--canonical-port) [ $# -ge 2 ] || die "--canonical-port requires a value"; CANONICAL_BASE="$2"; shift 2 ;;
 		--canonical-port=*) CANONICAL_BASE="${1#--canonical-port=}"; shift ;;
 		--canonical-takeover) CANONICAL_TAKEOVER=1; shift ;;
@@ -1189,6 +1305,9 @@ done
 
 is_uint "$LEASE_PID" || die "--lease-pid must be a non-negative integer"
 is_uint "$CANONICAL_BASE" || die "--canonical-port must be a non-negative integer"
+# Validate/normalize --isolate up front so `namespace` (and typos) are rejected
+# for every command, not just create.
+parse_isolate
 
 resolve_repo "$REPO_ARG"
 

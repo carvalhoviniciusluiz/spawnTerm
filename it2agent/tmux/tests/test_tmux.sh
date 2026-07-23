@@ -217,6 +217,15 @@ assert_contains "ports: exports IT2AGENT_PORT_WEB in the tmux session" "export I
 assert_contains "ports: exports IT2AGENT_PORT_DB in the tmux session"  "export IT2AGENT_PORT_DB="  "$iso_mp"
 assert_contains "ports: still exports the bare IT2AGENT_PORT"          "export IT2AGENT_PORT="     "$iso_mp"
 assert_contains "canonical: previews IT2AGENT_CANONICAL_PORT_WEB"      "export IT2AGENT_CANONICAL_PORT_WEB=" "$iso_mp"
+# #111: --isolate flows through into ENV-ONLY exports in the inner tmux session
+# script. --force-isolation forwards --no-gate to the worktree helper so the
+# per-mode isolate gates are bypassed for this dry-run preview.
+iso_svc="$(cd "$TMUX_DIR" && sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --isolate docker,db --force-isolation --dry-run -- claude)"
+assert_contains "isolate docker: COMPOSE_PROJECT_NAME in tmux session" "export COMPOSE_PROJECT_NAME=" "$iso_svc"
+assert_contains "isolate db: IT2AGENT_DB_SCHEMA in tmux session"       "export IT2AGENT_DB_SCHEMA="   "$iso_svc"
+assert_contains "isolate db: PGOPTIONS search_path in tmux session"    "export PGOPTIONS="            "$iso_svc"
+iso_dbd="$(cd "$TMUX_DIR" && sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --isolate db=database --force-isolation --dry-run -- claude)"
+assert_contains "isolate db=database: IT2AGENT_DB_NAME in tmux session" "export IT2AGENT_DB_NAME=" "$iso_dbd"
 # Restore the tmux gate to OFF for any later assertions.
 sh "$FLAG" disable agent.tmux >/dev/null 2>&1
 

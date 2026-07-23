@@ -193,6 +193,59 @@ it2agent-worktree canonical --repo . --id 42 --role worker --ports web --canonic
 - `cleanup` releases any canonical lease the removed worktree held, so another
   agent can take it.
 
+### Service isolation (`--isolate docker|db`, ENV-ONLY, OFF by default)
+
+The `$IT2AGENT_NS` prefix is only *advisory* on its own. `--isolate` turns it
+into concrete, opt-in service isolation by **exporting variables the project's
+own tooling already reads** — it never runs `docker` and never connects to
+Postgres. Each mode is independent, comma-composable (`--isolate docker,db`,
+also repeatable), and **self-gates on its own feature flag** (fail-safe OFF).
+
+| Mode | Flag | Exports (all derived from `$IT2AGENT_NS`) |
+| --- | --- | --- |
+| `docker` | `agent.isolate_docker` | `COMPOSE_PROJECT_NAME=$IT2AGENT_NS` |
+| `db` / `db=schema` | `agent.isolate_db` | `IT2AGENT_DB_SCHEMA=$IT2AGENT_NS` **and** `PGOPTIONS=-c search_path=$IT2AGENT_NS` |
+| `db=database` | `agent.isolate_db` | `IT2AGENT_DB_NAME=$IT2AGENT_NS` |
+| `namespace` | — | **rejected on macOS** (parse-time error) |
+
+```sh
+it2agent-flag enable agent.isolate_docker
+it2agent-flag enable agent.isolate_db
+
+it2agent-worktree create --repo . --id 13 --role worker --isolate docker,db
+#   env_COMPOSE_PROJECT_NAME=worker_d8763d   -> export COMPOSE_PROJECT_NAME=worker_d8763d
+#   env_IT2AGENT_DB_SCHEMA=worker_d8763d     -> export IT2AGENT_DB_SCHEMA=worker_d8763d
+#   env_PGOPTIONS=-c search_path=worker_d8763d
+#   isolate=docker,db=schema
+```
+
+- **`docker`** — `docker compose up` reads `COMPOSE_PROJECT_NAME` and gives the
+  stack its own network/volumes/containers, so parallel agents' compose stacks
+  don't collide. We only set the variable; nothing invokes docker.
+- **`db=schema`** (the default) — `PGOPTIONS=-c search_path=$IT2AGENT_NS` makes
+  the project's *existing* Postgres connection resolve unqualified tables in a
+  per-agent schema; `IT2AGENT_DB_SCHEMA` is the same name for code that wants it
+  explicitly. **The project must honor these**: it has to read `PGOPTIONS`/
+  `IT2AGENT_DB_SCHEMA` and run its migrations against that schema (e.g.
+  `CREATE SCHEMA IF NOT EXISTS "$IT2AGENT_DB_SCHEMA"`). it2agent hands over the
+  *name* — it never creates the schema (no credentials, no connection).
+- **`db=database`** — exports `IT2AGENT_DB_NAME=$IT2AGENT_NS` for projects that
+  prefer a database-per-agent; the project points its `$DATABASE_URL`/connection
+  at that name and creates it. Again, we only supply the name.
+- **`namespace`** — rejected: Linux netns/cgroups have no host-process
+  equivalent on macOS; the error points at `--isolate docker` (a container is
+  the only real network namespace on Darwin).
+- **Gating.** A requested mode emits **nothing** while its flag is OFF (the
+  default). `--no-gate` / `IT2AGENT_FORCE=1` bypass the per-mode gates for local
+  testing (and `--force-isolation` spawns forward `--no-gate` to the helper).
+- `it2agent-spawn` / `it2agent-tmux` forward `--isolate` and blindly turn each
+  emitted `env_<NAME>=<value>` line into an `export <NAME>=<value>` in the new
+  session, before the agent command runs.
+- **Not shown in `ls`/`status`.** The isolate exports are stateless (unlike port
+  leases there is no lease file), so the read-only reporters cannot recover the
+  active mode after the fact; surfacing it would require new persisted state and
+  is intentionally out of scope for this ENV-ONLY feature.
+
 ## `create` / `cleanup` (the side-effect layer)
 
 ```sh

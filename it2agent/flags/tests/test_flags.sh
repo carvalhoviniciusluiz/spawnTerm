@@ -98,14 +98,21 @@ echo "$SH_LIST" | grep -q "^agent.native_status *off$" && ok "list shows native_
 echo "$SH_LIST" | grep -q "^agent.team_bridge *off$" && ok "list shows team_bridge off" || fail "list team_bridge"
 # #109: canonical_port flag is registered and default OFF.
 echo "$SH_LIST" | grep -q "^agent.canonical_port *off$" && ok "list shows canonical_port off" || fail "list canonical_port"
+# #111: isolate_docker / isolate_db flags are registered and default OFF.
+echo "$SH_LIST" | grep -q "^agent.isolate_docker *off$" && ok "list shows isolate_docker off" || fail "list isolate_docker"
+echo "$SH_LIST" | grep -q "^agent.isolate_db *off$" && ok "list shows isolate_db off" || fail "list isolate_db"
 LIST_COUNT="$(printf '%s\n' "$SH_LIST" | grep -c '^agent\.')"
-[ "$LIST_COUNT" = "17" ] && ok "list shows 17 flags" || fail "list flag count = $LIST_COUNT, want 17"
+[ "$LIST_COUNT" = "19" ] && ok "list shows 19 flags" || fail "list flag count = $LIST_COUNT, want 19"
 assert_query run_shell "shell: native_status accepted (OFF)" agent.native_status 0 1
 assert_query run_py    "py:    native_status accepted (OFF)" native_status           0 1
 assert_query run_shell "shell: team_bridge accepted (OFF)" agent.team_bridge 0 1
 assert_query run_py    "py:    team_bridge accepted (OFF)" team_bridge           0 1
 assert_query run_shell "shell: canonical_port accepted (OFF)" agent.canonical_port 0 1
 assert_query run_py    "py:    canonical_port accepted (OFF)" canonical_port           0 1
+assert_query run_shell "shell: isolate_docker accepted (OFF)" agent.isolate_docker 0 1
+assert_query run_py    "py:    isolate_docker accepted (OFF)" isolate_docker           0 1
+assert_query run_shell "shell: isolate_db accepted (OFF)" agent.isolate_db 0 1
+assert_query run_py    "py:    isolate_db accepted (OFF)" isolate_db           0 1
 
 echo "== canonical file byte-for-byte parity (shell vs python writer) =="
 reset

@@ -50,6 +50,8 @@ KNOWN_FLAGS: dict[str, str] = {
     "native_status": "Publishes agent state to iTerm2's native tab status and Cockpit via OSC 21337.",
     "team_bridge": "Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session's death.",
     "canonical_port": "The focused agent also answers on the normal localhost port (e.g. 3000), not just its dynamic one.",
+    "isolate_docker": "Sets COMPOSE_PROJECT_NAME per agent so Docker Compose stacks don't collide.",
+    "isolate_db": "Exports a per-agent Postgres schema/search_path so agents don't share DB state.",
 }
 
 
