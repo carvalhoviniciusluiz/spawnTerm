@@ -9,6 +9,14 @@ reviewer **one command per agent** to do exactly that, next to the agent's tab.
 flag helper, the #34/#35 broker, and `osascript`. It never modifies iTerm2
 source.
 
+> **Re-scope note (#100):** the piece that is genuinely ours and worth keeping is
+> the **durable broker-notify leg** — `request-changes` routing through the
+> broker mailbox (`review_notify.py`), which survives restart and is acked. We do
+> **not** build a diff-rendering / review overlay: iTerm2's native **Code Review**
+> overlay + `start_code_review` already cover that (view diffs there). No code is
+> removed; `it2agent-review` stays behind `agent.review` (default OFF). See
+> `native-vs-it2agent.md` (Path 3 / #14).
+
 ```
 it2agent-review resolve         <agent> [--role R]        # pure: branch/worktree/base
 it2agent-review show            <agent> [--role R]        # diff vs base (--stat + patch)

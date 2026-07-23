@@ -31,6 +31,13 @@ be lost. There is **no** queue, replay, ack, retry, or ordering guarantee — th
 durable path is Tier 2 (#4) and is intentionally out of scope here. The injected
 text carries a ``[it2agent]`` marker and the sender id so the receiving agent
 can see it is a it2agent relay rather than local input.
+
+**Re-scope note (#100).** The *canonical* messaging path is the durable Tier 2
+broker (mailbox + ack + replay). This in-memory router is retained **only** as
+the degraded fallback the #37 bridge selects when the broker is absent or
+unreachable — not as a feature to build on. No API change, no behavior change:
+it still runs when ``agent.messaging`` is on and the broker is down. See
+``it2agent/docs/native-vs-it2agent.md`` (Path 3 / #28).
 """
 
 from __future__ import annotations

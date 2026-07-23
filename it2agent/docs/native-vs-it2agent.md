@@ -129,10 +129,16 @@ Storage and durability (authoritative, `code.claude.com/docs/en/agent-teams`, v2
 - **Mirror Claude Code agent-teams task/coordination state into the broker** via a `TeammateIdle` /
   `TaskCompleted` / `TaskCreated` hook so it survives lead death — see `cooperation-strategy.md`.
 
-**Retire or re-scope (we duplicate native, often worse):**
-- **#28 in-memory router** as a standalone messaging path → RETIRE (durable broker only).
+**Retire or re-scope (we duplicate native, often worse) — DOCUMENTED (#100, docs + flag text only, no
+code removed, no default changed):**
+- **#28 in-memory router** as a standalone messaging path → RETIRE (durable broker only). Router doc now
+  states the canonical path is the durable broker; the router is kept only as the #37 bridge's degraded
+  fallback (`daemon/router.py`, `daemon/README.md`).
 - **#7/#8 status color/badge, #29 dashboard** → RE-SCOPE to feed OSC 21337 / Cockpit, not a 2nd board.
+  The `agent.status_board` flag description is marked LEGACY and points at `agent.native_status` (#88);
+  the #29 dashboard doc points at the native Cockpit (`daemon/README.md`).
 - **#14 review** → RE-SCOPE to the durable-broker notify leg; don't reimplement the native overlay.
+  Documented in `review/README.md` (keep `review_notify.py`; view diffs in native Code Review).
 
 ## Bottom line
 Stop competing on session-driving, status, review, and the safety gate — native does those, and one

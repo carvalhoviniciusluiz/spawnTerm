@@ -69,7 +69,7 @@ Namespaced keys are `agent.<capability>`. All default **`false`**.
 
 | Key | Capability |
 |-----|------------|
-| `agent.status_board` | Tier 0 escape-code status board (agents emit state; iTerm2 paints it). |
+| `agent.status_board` | **LEGACY** (duplicates the native Cockpit): Tier 0 `SetUserVar`/tab-color status board. Prefer `agent.native_status` (OSC 21337 → native tab status + Cockpit, #88). Stays OFF for compatibility; no default change. |
 | `agent.worktree_isolation` | Per-agent git-worktree + `$PORT` isolation. |
 | `agent.messaging` | Cross-tab agent-to-agent messaging via the broker. |
 | `agent.inbox` | Durable per-agent inbox surface. |
