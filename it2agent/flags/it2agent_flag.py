@@ -49,6 +49,7 @@ KNOWN_FLAGS: dict[str, str] = {
     "codex_status": "Shows Codex CLI working/idle activity in the tab status.",
     "native_status": "Publishes agent state to iTerm2's native tab status and Cockpit via OSC 21337.",
     "team_bridge": "Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session's death.",
+    "canonical_port": "The focused agent also answers on the normal localhost port (e.g. 3000), not just its dynamic one.",
 }
 
 

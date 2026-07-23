@@ -96,12 +96,16 @@ echo "$SH_LIST" | grep -q "^agent.janitor *off$" && ok "list shows janitor off" 
 echo "$SH_LIST" | grep -q "^agent.native_status *off$" && ok "list shows native_status off" || fail "list native_status"
 # #92: team_bridge flag is registered and default OFF.
 echo "$SH_LIST" | grep -q "^agent.team_bridge *off$" && ok "list shows team_bridge off" || fail "list team_bridge"
+# #109: canonical_port flag is registered and default OFF.
+echo "$SH_LIST" | grep -q "^agent.canonical_port *off$" && ok "list shows canonical_port off" || fail "list canonical_port"
 LIST_COUNT="$(printf '%s\n' "$SH_LIST" | grep -c '^agent\.')"
-[ "$LIST_COUNT" = "16" ] && ok "list shows 16 flags" || fail "list flag count = $LIST_COUNT, want 16"
+[ "$LIST_COUNT" = "17" ] && ok "list shows 17 flags" || fail "list flag count = $LIST_COUNT, want 17"
 assert_query run_shell "shell: native_status accepted (OFF)" agent.native_status 0 1
 assert_query run_py    "py:    native_status accepted (OFF)" native_status           0 1
 assert_query run_shell "shell: team_bridge accepted (OFF)" agent.team_bridge 0 1
 assert_query run_py    "py:    team_bridge accepted (OFF)" team_bridge           0 1
+assert_query run_shell "shell: canonical_port accepted (OFF)" agent.canonical_port 0 1
+assert_query run_py    "py:    canonical_port accepted (OFF)" canonical_port           0 1
 
 echo "== canonical file byte-for-byte parity (shell vs python writer) =="
 reset

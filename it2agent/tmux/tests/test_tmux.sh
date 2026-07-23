@@ -209,6 +209,14 @@ assert_contains "isolation ON via --force-isolation"              "isolation    
 assert_contains "ON: exports IT2AGENT_PORT into the tmux session" "export IT2AGENT_PORT="                  "$iso_on"
 iso_on_env="$(cd "$TMUX_DIR" && IT2AGENT_FORCE_ISOLATION=1 sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --dry-run -- claude)"
 assert_contains "IT2AGENT_FORCE_ISOLATION=1 turns isolation ON"   "isolation    : ON"  "$iso_on_env"
+# #109: --ports flows through into per-name IT2AGENT_PORT_<UPPER> exports in the
+# inner tmux session script (plus the bare alias); --force-isolation also previews
+# the canonical export.
+iso_mp="$(cd "$TMUX_DIR" && sh "$TMUX_BIN" spawn --id 5 --role worker --task iso --ports web,db --force-isolation --dry-run -- claude)"
+assert_contains "ports: exports IT2AGENT_PORT_WEB in the tmux session" "export IT2AGENT_PORT_WEB=" "$iso_mp"
+assert_contains "ports: exports IT2AGENT_PORT_DB in the tmux session"  "export IT2AGENT_PORT_DB="  "$iso_mp"
+assert_contains "ports: still exports the bare IT2AGENT_PORT"          "export IT2AGENT_PORT="     "$iso_mp"
+assert_contains "canonical: previews IT2AGENT_CANONICAL_PORT_WEB"      "export IT2AGENT_CANONICAL_PORT_WEB=" "$iso_mp"
 # Restore the tmux gate to OFF for any later assertions.
 sh "$FLAG" disable agent.tmux >/dev/null 2>&1
 

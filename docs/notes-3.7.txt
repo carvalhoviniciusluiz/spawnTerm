@@ -110,6 +110,29 @@ Major New Features:
   pure readers: they allocate nothing and only
   report stale entries, never delete them.
 
+- The it2agent-worktree helper now accepts
+  --ports web,db,cache to give one agent
+  several dynamic ports at once. Each name is
+  exported as IT2AGENT_PORT_<NAME>, and the
+  first is also the plain IT2AGENT_PORT for
+  back-compat. The spawn and tmux wrappers
+  forward the flag, and ls / status --json now
+  list all of an agent's ports. Without --ports
+  the behavior is unchanged: one port.
+
+- A new agent capability, "Canonical Port",
+  lets the focused agent also answer on the
+  normal localhost port (e.g. 3000), not just
+  its dynamic one. When on, one agent per repo
+  and port name holds the canonical number and
+  also exports IT2AGENT_CANONICAL_PORT_<NAME>;
+  a second agent does not, until the holder
+  hands it back with "it2agent-worktree
+  canonical --release". The number is handed
+  over; no proxy is involved yet. Off by
+  default; enable it in Settings > General >
+  AI > AI Agents.
+
 - A new agent capability, "Team Bridge",
   durably mirrors Claude Code agent-teams
   task and coordination state into the
