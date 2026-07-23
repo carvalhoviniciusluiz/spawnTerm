@@ -52,6 +52,7 @@ KNOWN_FLAGS: dict[str, str] = {
     "canonical_port": "The focused agent also answers on the normal localhost port (e.g. 3000), not just its dynamic one.",
     "isolate_docker": "Sets COMPOSE_PROJECT_NAME per agent so Docker Compose stacks don't collide.",
     "isolate_db": "Exports a per-agent Postgres schema/search_path so agents don't share DB state.",
+    "autobrief": "On each Claude Code session start, injects a short it2agent capabilities brief into the agent's context so it discovers the tooling automatically.",
 }
 
 

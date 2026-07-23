@@ -11,14 +11,22 @@ Orchestrate multiple AI coding agents running in separate **iTerm2** tabs/panes 
 
 Every capability is a feature flag, **default OFF**. The one place to discover what exists and how to
 use it is [`AGENT_GUIDE.md`](AGENT_GUIDE.md) — a terse, agent-facing cheat-sheet (flag → command/MCP
-tool → example). It is the **single source of truth**; three surfaces read it (no duplication):
+tool → example). It is the **single source of truth**; four surfaces read it (no duplication):
 
 - **`it2agent help`** (or `./it2agent-help`) — prints the guide plus a live "Currently enabled" list
   from `it2agent-flag list`. Never gated — help always works.
+- **`it2agent brief`** — a short, live summary of what is turned on right now (active capabilities →
+  how to use → pointer to `it2agent help` + the MCP tools). This is also what the SessionStart
+  **autobrief** hook injects into a fresh Claude's context (flag `agent.autobrief`, default OFF).
 - **MCP** — the `help` tool returns the guide; it is also exposed via `resources/read` and the
   `initialize` instructions (see `mcp/`).
 - **Spawn** — `it2agent-spawn` injects a one-line pointer (`run: it2agent help`) into each new
   agent's tab (opt out with `--no-guide`).
+
+`AGENT_GUIDE.md` is **generated** (#113): `it2agent guide` regenerates it from the flag schema
+(`KNOWN_FLAGS`) and the MCP tool registry, so adding or removing a capability updates the guide
+automatically. `it2agent guide --check` fails on drift (a test enforces this), so the doc can never
+go stale.
 
 ## Why
 Today, spawning/coordinating agents across terminal tabs is manual and lossy: no view of who is

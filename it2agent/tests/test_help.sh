@@ -52,7 +52,10 @@ echo "--- 1. prints the guide verbatim (single source of truth) ---"
 out="$(sh "$HELP")"
 assert_contains "prints the guide title"          "# it2agent — agent capability guide" "$out"
 assert_contains "prints a capability (status board)" "agent.status_board"             "$out"
-assert_contains "prints the MCP help tool row"    "return this guide"                    "$out"
+# The guide is GENERATED from the flag schema + MCP tool registry (#113): it lists
+# every MCP tool by name and says so.
+assert_contains "prints the MCP help tool row"    "\`help\`"                             "$out"
+assert_contains "notes the guide is generated"    "GENERATED"                            "$out"
 # No duplication: the guide portion equals AGENT_GUIDE.md byte-for-byte.
 guide_text="$(cat "$GUIDE")"
 case "$out" in

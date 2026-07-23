@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# it2agent-brief — print a short, live summary of active it2agent capabilities
+# (#113). Root sibling of the umbrella (like it2agent-help) so `it2agent brief`
+# resolves from a fresh checkout. scope:external-tooling — thin launcher for
+# guide/it2agent_guide.py; reads the flag schema + MCP tool registry and the live
+# flag state, never modifies iTerm2 source.
+here=$(cd "$(dirname "$0")" && pwd)
+exec python3 "$here/guide/it2agent_guide.py" brief "$@"

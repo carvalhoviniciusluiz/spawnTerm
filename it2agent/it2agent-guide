@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# it2agent-guide — (re)generate AGENT_GUIDE.md from the flag schema + MCP tool
+# registry (#113). Root sibling of the umbrella so `it2agent guide` resolves from
+# a fresh checkout. scope:external-tooling — thin launcher for guide/it2agent_guide.py.
+#   it2agent guide            regenerate AGENT_GUIDE.md
+#   it2agent guide --check    exit non-zero if the committed guide has drifted
+#   it2agent guide render     print a fresh render to stdout (no file write)
+here=$(cd "$(dirname "$0")" && pwd)
+case "${1:-}" in
+	render)
+		exec python3 "$here/guide/it2agent_guide.py" render ;;
+	*)
+		exec python3 "$here/guide/it2agent_guide.py" guide "$@" ;;
+esac
