@@ -7,7 +7,7 @@ and nothing else:
   1. :data:`TOOLS` — the ordered registry mapping a tool name to its JSON-Schema
      input contract, human description, and handler. This is what ``tools/list``
      serializes and what ``tools/call`` dispatches on.
-  2. The six handlers. Each is a pure function ``handler(arguments, deps)`` that
+  2. The eight handlers. Each is a pure function ``handler(arguments, deps)`` that
      validates its arguments and maps them onto exactly one Tier 1 spawn plan or
      Tier 2 broker op, returning a JSON-friendly result dict carrying an ``ok``
      boolean. They do **no** transport: the broker client and the spawn launcher
@@ -33,6 +33,13 @@ not reimplement transport or state.
     send_message   broker ``send`` (durable, ack'd mailbox)
     status         broker ``handoff_get`` (latest handoff/state for an agent)
     list_agents    broker ``query`` (registry, role/alive/capability filters)
+    team_tasks     broker ``handoff_history`` for a team key, grouped by the
+                   ``task:`` goal-prefix the team bridge (#92) writes — the
+                   pending→completed lifecycle of each task, still readable after
+                   the lead dies (a read-model over the mirrored write side)
+    read_messages  broker ``poll`` (NON-destructive) + client-side ``id > since``
+                   filtering — an idempotent, offset-based read of an agent's
+                   durable inbox that never acks and never advances the cursor
 """
 
 from __future__ import annotations
@@ -133,6 +140,20 @@ def _optional_bool(arguments: dict, key: str) -> Optional[bool]:
     value = arguments[key]
     if not isinstance(value, bool):
         raise ValueError(f"'{key}' must be a boolean")
+    return value
+
+
+def _optional_int(arguments: dict, key: str) -> Optional[int]:
+    """Return an optional non-negative int argument (None if absent).
+
+    Rejects booleans (``bool`` is an ``int`` subclass in Python), non-ints, and
+    negatives so an offset can never be a disguised ``True`` or a rewind.
+    """
+    if key not in arguments or arguments[key] is None:
+        return None
+    value = arguments[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"'{key}' must be a non-negative integer")
     return value
 
 
@@ -330,6 +351,108 @@ def handle_list_agents(arguments: dict, deps: Deps) -> dict:
         op["capability"] = capability
     resp = deps.broker.request(op)
     return _broker_result(resp)
+
+
+# The team bridge (#92, it2agent_team_hook.py) writes each task's lifecycle as an
+# append-only handoff history under the durable key ``team:session-<sid8>`` with a
+# ``task:<id>`` goal. These read tools line up with exactly that shape.
+_TEAM_PREFIX = "team:"
+_TASK_PREFIX = "task:"
+
+
+def _team_key(team: str) -> str:
+    """Resolve a ``team`` argument to the durable broker key the bridge writes.
+
+    Accepts an already-formed key (``team:session-<sid8>`` — used verbatim) or a
+    raw ``session_id`` (derived to ``team:session-<sid8>``), mirroring
+    ``it2agent_team_hook.team_key`` so a read lines up with what the bridge wrote
+    regardless of which form the caller has on hand.
+    """
+    if team.startswith(_TEAM_PREFIX):
+        return team
+    return f"team:session-{team[:8]}"
+
+
+def _group_task_handoffs(handoffs: list) -> list[dict]:
+    """Group ``task:``-goal handoffs into a per-task lifecycle, order preserved.
+
+    ``handoffs`` arrives oldest→newest (broker ``handoff_history`` order), so each
+    task's ``history`` is its append-only pending→completed timeline and ``status``
+    is the latest ``verification_status``. Non-``task:`` goals are ignored.
+    """
+    order: list[str] = []
+    by_goal: dict[str, dict] = {}
+    for handoff in handoffs:
+        if not isinstance(handoff, dict):
+            continue
+        goal = handoff.get("goal")
+        if not isinstance(goal, str) or not goal.startswith(_TASK_PREFIX):
+            continue
+        entry = by_goal.get(goal)
+        if entry is None:
+            entry = {"task": goal[len(_TASK_PREFIX):], "goal": goal, "history": []}
+            by_goal[goal] = entry
+            order.append(goal)
+        entry["history"].append(handoff)
+    tasks = []
+    for goal in order:
+        entry = by_goal[goal]
+        entry["status"] = entry["history"][-1].get("verification_status")
+        tasks.append(entry)
+    return tasks
+
+
+def handle_team_tasks(arguments: dict, deps: Deps) -> dict:
+    """Read a team's task lifecycle → broker ``handoff_history`` grouped by task.
+
+    Composes the READ side of the #92 mirror purely over the existing
+    ``handoff_history`` op: fetch every handoff for the team key and group the
+    ``task:``-prefixed goals into per-task histories. This is the durable team
+    state that survives the lead dying — a read-model, no new broker op.
+    """
+    try:
+        team = _require_str(arguments, "team")
+    except ValueError as exc:
+        return _bad_request(str(exc))
+
+    key = _team_key(team)
+    resp = deps.broker.request({"op": "handoff_history", "agent_id": key})
+    if not isinstance(resp, dict):
+        return {"ok": False, "error": "broker_error", "message": "non-dict broker reply"}
+    if not resp.get("ok"):
+        return resp
+    handoffs = resp.get("handoffs") or []
+    tasks = _group_task_handoffs(handoffs)
+    return _ok(team=key, tasks=tasks, count=len(tasks))
+
+
+def handle_read_messages(arguments: dict, deps: Deps) -> dict:
+    """Idempotent, offset-based read of an agent's inbox → broker ``poll``.
+
+    NON-destructive by construction: we ``poll`` the mailbox but NEVER ``ack``,
+    then filter ``id > since`` client-side (default ``since=0`` ⇒ everything). The
+    ack cursor is untouched, so a subsequent normal poll still replays every
+    message — this is a read, not a consume (inbox pattern; see #92 read surface).
+    """
+    try:
+        agent = _require_str(arguments, "agent")
+        since = _optional_int(arguments, "since")
+    except ValueError as exc:
+        return _bad_request(str(exc))
+
+    floor = 0 if since is None else since
+    resp = deps.broker.request({"op": "poll", "agent": agent})
+    if not isinstance(resp, dict):
+        return {"ok": False, "error": "broker_error", "message": "non-dict broker reply"}
+    if not resp.get("ok"):
+        return resp
+    messages = resp.get("messages") or []
+    delta = [
+        m
+        for m in messages
+        if isinstance(m, dict) and isinstance(m.get("id"), int) and m["id"] > floor
+    ]
+    return _ok(agent=agent, since=floor, messages=delta, count=len(delta))
 
 
 def handle_help(arguments: dict, deps: Deps) -> dict:
@@ -542,6 +665,54 @@ _register(
             required=[],
         ),
         handler=handle_list_agents,
+    )
+)
+
+
+_register(
+    ToolSpec(
+        name="team_tasks",
+        description=(
+            "Read the durable task lifecycle of a Claude Code agent team mirrored "
+            "into the broker by the team bridge (#92). Returns each task's "
+            "append-only pending→completed history, grouped by its 'task:' goal — "
+            "queryable even after the team lead dies. 'team' is the session id or "
+            "the derived 'team:session-<sid8>' key."
+        ),
+        input_schema=_obj(
+            {
+                "team": {
+                    "type": "string",
+                    "description": "team session id, or the 'team:session-<sid8>' key.",
+                },
+            },
+            required=["team"],
+        ),
+        handler=handle_team_tasks,
+    )
+)
+
+_register(
+    ToolSpec(
+        name="read_messages",
+        description=(
+            "Non-destructively read an agent's durable inbox from the broker "
+            "mailbox: returns messages with id > 'since' (default 0) WITHOUT "
+            "acking, so the ack cursor is untouched and a later poll still "
+            "replays everything. An idempotent, offset-based read (not a consume)."
+        ),
+        input_schema=_obj(
+            {
+                "agent": {"type": "string", "description": "the recipient agent id / mailbox."},
+                "since": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "exclusive id floor; return only id > since (default 0).",
+                },
+            },
+            required=["agent"],
+        ),
+        handler=handle_read_messages,
     )
 )
 

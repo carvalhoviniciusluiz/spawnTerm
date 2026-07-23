@@ -220,6 +220,103 @@ class TestListAgents(unittest.TestCase):
         )
 
 
+class TestTeamTasks(unittest.TestCase):
+    def _history(self):
+        # Oldest→newest, as broker handoff_history returns (task:T1 pending→
+        # completed, task:T2 pending). A non-task goal must be ignored.
+        return {
+            "ok": True,
+            "handoffs": [
+                {"id": 1, "goal": "task:T1", "verification_status": "pending"},
+                {"id": 2, "goal": "task:T2", "verification_status": "pending"},
+                {"id": 3, "goal": "task:T1", "verification_status": "completed"},
+                {"id": 4, "goal": "note:misc", "verification_status": "x"},
+            ],
+            "count": 4,
+        }
+
+    def test_maps_to_handoff_history_and_groups_by_task(self):
+        broker = FakeBroker(reply=self._history())
+        deps = make_deps(broker)
+        result = tools.call_tool("team_tasks", {"team": "team:session-ab12cd34"}, deps)
+        self.assertTrue(result["ok"])
+        # It read handoff_history for the given team key (no new broker op).
+        self.assertEqual(
+            broker.ops[0], {"op": "handoff_history", "agent_id": "team:session-ab12cd34"}
+        )
+        self.assertEqual(result["team"], "team:session-ab12cd34")
+        self.assertEqual(result["count"], 2)  # T1 and T2; note:misc dropped
+        by_task = {t["task"]: t for t in result["tasks"]}
+        # T1's append-only lifecycle is pending→completed; status is the latest.
+        self.assertEqual([h["verification_status"] for h in by_task["T1"]["history"]],
+                         ["pending", "completed"])
+        self.assertEqual(by_task["T1"]["status"], "completed")
+        # T2 is still pending (single row).
+        self.assertEqual(by_task["T2"]["status"], "pending")
+        self.assertEqual(len(by_task["T2"]["history"]), 1)
+
+    def test_derives_team_key_from_session_id(self):
+        # A raw session id is derived to team:session-<sid8>, matching the bridge.
+        broker = FakeBroker(reply={"ok": True, "handoffs": [], "count": 0})
+        deps = make_deps(broker)
+        result = tools.call_tool("team_tasks", {"team": "ab12cd34-9999-0000"}, deps)
+        self.assertEqual(broker.ops[0]["agent_id"], "team:session-ab12cd34")
+        self.assertEqual(result["team"], "team:session-ab12cd34")
+
+    def test_missing_team_is_bad_request(self):
+        result = tools.call_tool("team_tasks", {}, make_deps())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "bad_request")
+
+    def test_broker_error_is_passed_through(self):
+        broker = FakeBroker(reply={"ok": False, "error": "not_found"})
+        deps = make_deps(broker)
+        result = tools.call_tool("team_tasks", {"team": "t"}, deps)
+        self.assertFalse(result["ok"])
+
+
+class TestReadMessages(unittest.TestCase):
+    def _mailbox(self):
+        return {
+            "ok": True,
+            "messages": [
+                {"id": 1, "from": "a", "to": "impl-1", "body": "m1"},
+                {"id": 2, "from": "a", "to": "impl-1", "body": "m2"},
+                {"id": 3, "from": "b", "to": "impl-1", "body": "m3"},
+            ],
+            "count": 3,
+        }
+
+    def test_polls_without_since_and_never_acks(self):
+        broker = FakeBroker(reply=self._mailbox())
+        deps = make_deps(broker)
+        result = tools.call_tool("read_messages", {"agent": "impl-1"}, deps)
+        self.assertTrue(result["ok"])
+        # Composed over plain poll (no 'since' pushed to the broker) and NO ack.
+        self.assertEqual(broker.ops, [{"op": "poll", "agent": "impl-1"}])
+        self.assertEqual(result["count"], 3)  # since defaults to 0
+
+    def test_since_returns_only_the_delta(self):
+        broker = FakeBroker(reply=self._mailbox())
+        deps = make_deps(broker)
+        result = tools.call_tool("read_messages", {"agent": "impl-1", "since": 2}, deps)
+        self.assertTrue(result["ok"])
+        self.assertEqual([m["id"] for m in result["messages"]], [3])
+        self.assertEqual(result["since"], 2)
+        # Still just a poll; the offset filter is client-side, no ack ever.
+        self.assertEqual(broker.ops, [{"op": "poll", "agent": "impl-1"}])
+
+    def test_missing_agent_is_bad_request(self):
+        result = tools.call_tool("read_messages", {}, make_deps())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "bad_request")
+
+    def test_bad_since_type_is_bad_request(self):
+        for bad in ("2", -1, True):
+            result = tools.call_tool("read_messages", {"agent": "a", "since": bad}, make_deps())
+            self.assertFalse(result["ok"], f"since={bad!r} should be rejected")
+
+
 class TestHelp(unittest.TestCase):
     def test_returns_guide_text(self):
         # The help tool needs no broker/spawn; it reads AGENT_GUIDE.md.
@@ -245,7 +342,8 @@ class TestRegistry(unittest.TestCase):
     def test_all_tools_present(self):
         self.assertEqual(
             set(tools.TOOLS),
-            {"spawn", "assign", "handoff", "send_message", "status", "list_agents", "help"},
+            {"spawn", "assign", "handoff", "send_message", "status", "list_agents",
+             "team_tasks", "read_messages", "help"},
         )
 
     def test_descriptors_have_valid_schemas(self):

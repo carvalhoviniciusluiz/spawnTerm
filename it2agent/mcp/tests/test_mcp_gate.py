@@ -121,7 +121,7 @@ class TestStdioLoop(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(_json.loads(lines[0])["id"], 1)
         self.assertEqual(_json.loads(lines[1])["id"], 2)
-        self.assertEqual(len(_json.loads(lines[1])["result"]["tools"]), 7)
+        self.assertEqual(len(_json.loads(lines[1])["result"]["tools"]), 9)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,8 @@ Each tool maps to exactly one Tier 1 spawn plan or Tier 2 broker op:
 | `send_message` | broker `send` | durable, acknowledged message to another agent |
 | `status` | broker `handoff_get` | latest handoff/state for an agent |
 | `list_agents` | broker `query` | list registry agents (role/alive/capability filters) |
+| `team_tasks` | broker `handoff_history` (grouped by `task:` goal) | read a mirrored team's per-task pending→completed lifecycle (#94; survives lead death) |
+| `read_messages` | broker `poll` + client-side `id > since` filter | non-destructive, offset-based inbox read — never acks, cursor intact (#94) |
 | `help` | reads `../AGENT_GUIDE.md` | return the consolidated capability guide (#56); no broker/spawn dependency |
 
 The guide (`it2agent/AGENT_GUIDE.md`) is the single source of truth; the `help`
@@ -115,6 +117,20 @@ list), `alive` (bool).
 {"name": "list_agents", "arguments": {"role": "implementer", "alive": true}}
 ```
 
+**`team_tasks`** — `team` (required): a session id, or the derived
+`team:session-<sid8>` key. Returns each `task:`-goal's append-only history.
+
+```json
+{"name": "team_tasks", "arguments": {"team": "team:session-ab12cd34"}}
+```
+
+**`read_messages`** — `agent` (required); `since` (optional non-negative int,
+default 0). Returns inbox messages with `id > since`; never acks.
+
+```json
+{"name": "read_messages", "arguments": {"agent": "impl-1", "since": 5}}
+```
+
 ## MCP protocol
 
 A minimal, correct JSON-RPC 2.0 subset implemented with the stdlib only (`json`,
@@ -124,7 +140,7 @@ per line on stdin, one response line per non-notification on stdout. Implemented
 - `initialize` — handshake; advertises `tools` + `resources` capability +
   `serverInfo` + an `instructions` pointer to the guide (echoes the client's
   `protocolVersion`, else `2024-11-05`).
-- `tools/list` — the seven tool descriptors with their JSON schemas.
+- `tools/list` — the nine tool descriptors with their JSON schemas.
 - `tools/call` — dispatch to a handler; result wrapped as an MCP tool result.
 - `resources/list` / `resources/read` — the one guide resource (`AGENT_GUIDE.md`).
 - `ping` — utility ping (empty result).
@@ -186,8 +202,9 @@ bash it2agent/mcp/tests/run_tests.sh
 ```
 
 Pure Python, stdlib only — no services, no sockets, no sleeps, no network.
-Covers the seven handlers (arguments → broker/spawn op, via a mock broker + mock
-launcher; the `help` tool returns the guide text), the JSON-RPC/MCP dispatch
+Covers the nine handlers (arguments → broker/spawn op, via a mock broker + mock
+launcher; the `help` tool returns the guide text; `team_tasks`/`read_messages`
+compose the #94 read surface over `handoff_history`/`poll`), the JSON-RPC/MCP dispatch
 (initialize, `tools/list` schemas, `tools/call`, `resources/list` +
 `resources/read`, malformed → JSON-RPC error, notifications), the `agent.mcp`
 gate + purity, and a framed stdio round-trip.

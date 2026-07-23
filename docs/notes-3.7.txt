@@ -83,6 +83,17 @@ Major New Features:
   "it2agent-team-hook install" to opt in. Off
   by default.
 
+- The it2agent MCP surface gained two
+  read-only tools over the durable team
+  mirror: "team_tasks" returns a team's
+  per-task pending-to-completed lifecycle
+  (from the append-only handoff history) and
+  "read_messages" does a non-destructive,
+  offset-based read of an agent's inbox that
+  never acks, so the cursor stays intact.
+  Both are gated on the MCP capability and
+  add no new broker operation.
+
 - The Companion app can now receive push
   notifications for terminal alerts. Turn on
   "Send alerts to paired iPhone" in a profile's
