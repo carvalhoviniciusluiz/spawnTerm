@@ -151,6 +151,18 @@ assert_contains "ON: branch under it2agent/"         "branch=it2agent/worker-13-
 assert_contains "ON: user command preserved after exports" "'claude'" "$iso_on"
 
 echo
+echo "--- 6b2. multi-port + canonical passthrough (#109) ---"
+# --ports flows through to the worktree helper: the new session exports one
+# IT2AGENT_PORT_<UPPER> per name plus the bare IT2AGENT_PORT alias. --force-isolation
+# also bypasses the canonical gate, so the dry-run plan previews a canonical export.
+mp_on="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --task iso --ports web,db,cache --force-isolation --dry-run -- claude)"
+assert_contains "ports: exports IT2AGENT_PORT_WEB"   "export IT2AGENT_PORT_WEB="   "$mp_on"
+assert_contains "ports: exports IT2AGENT_PORT_DB"    "export IT2AGENT_PORT_DB="    "$mp_on"
+assert_contains "ports: exports IT2AGENT_PORT_CACHE" "export IT2AGENT_PORT_CACHE=" "$mp_on"
+assert_contains "ports: still exports the bare IT2AGENT_PORT (back-compat)" "export IT2AGENT_PORT=" "$mp_on"
+assert_contains "canonical: previews IT2AGENT_CANONICAL_PORT_WEB" "export IT2AGENT_CANONICAL_PORT_WEB=" "$mp_on"
+
+echo
 echo "--- 6c. capability-guide header (#56) ---"
 # By default the new session gets a 1-line pointer to the guide (it2agent help),
 # both flagged in the plan and present in the session commands.

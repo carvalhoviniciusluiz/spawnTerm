@@ -63,9 +63,17 @@ set -eu
 
 PROG="it2agent-worktree"
 FLAG_KEY="agent.worktree_isolation"
+# Sub-flag for the canonical-port feature (item 4). Fail-safe OFF: the canonical
+# singleton lease is only touched when this is ON (or bypassed via --no-gate /
+# IT2AGENT_FORCE). It is independent of the worktree_isolation gate above.
+FLAG_KEY_CANONICAL="agent.canonical_port"
 
 DEFAULT_BASE_PORT=41000
 DEFAULT_SPAN=1000
+# Default base for the canonical (project-normal) port. The first --ports name
+# maps to this number, the second to +1, and so on. Override with
+# --canonical-port <base>.
+DEFAULT_CANONICAL_BASE=3000
 SLUG_MAX=40
 
 # Field separator for the ls/status reporter's intermediate records. A US (unit
@@ -187,6 +195,46 @@ is_uint() {
 	esac
 }
 
+# sanitize_portname $1 into a lowercase [a-z0-9_] token for a --ports name:
+# lowercase, others -> '_', runs collapsed, trimmed. Empty -> "".
+sanitize_portname() {
+	printf '%s' "$1" \
+		| tr '[:upper:]' '[:lower:]' \
+		| tr -c 'a-z0-9_' '_' \
+		| sed -E 's/_+/_/g; s/^_//; s/_$//'
+}
+
+# portkey $1: the UPPER-cased env-var suffix for a (sanitized) port name, so
+# name "web" -> IT2AGENT_PORT_WEB. Input is already [a-z0-9_].
+portkey() {
+	printf '%s' "$1" | tr '[:lower:]' '[:upper:]'
+}
+
+# port_names_list: echo the sanitized --ports names, one per line. Empty output
+# means "no --ports given" (single default port, byte-identical to #13). Depends
+# on the PORTS_CSV global set by the parser.
+port_names_list() {
+	[ -n "$PORTS_CSV" ] || return 0
+	# Trailing newline is required so `read` does not drop the final (unterminated)
+	# name — PORTS_CSV has no trailing comma, so tr would otherwise leave the last
+	# token without a newline.
+	printf '%s\n' "$PORTS_CSV" | tr ',' '\n' | while IFS= read -r raw; do
+		nm="$(sanitize_portname "$raw")"
+		[ -n "$nm" ] && printf '%s\n' "$nm"
+	done
+}
+
+# port_candidate $1 = port name: deterministic candidate port for a NAMED port,
+# folding the name into the hash so several named ports for one agent don't
+# collide with each other: base + (int(first 7 hex of sha1("<repo>|<id>|<name>"))
+# % span). The unnamed (default) port keeps using compute_plan's HASH (no name),
+# so behavior without --ports is byte-identical to #13.
+port_candidate() {
+	_h="$(printf '%s|%s|%s' "$REPO_ROOT" "$AGENT_ID" "$1" | sha_hex)"
+	_ph="$(printf '%s' "$_h" | cut -c1-7)"
+	printf '%s' "$(( BASE_PORT + (0x$_ph % SPAN) ))"
+}
+
 # compute_wt_root: sets WT_ROOT (the per-repo worktree parent) and LEASES_DIR
 # (the shared lease dir beside it) from REPO_ROOT alone — no agent id needed, so
 # the read-only reporters (ls/status) can locate leases without a plan. Pure.
@@ -244,6 +292,39 @@ print_plan() {
 	printf 'namespace=%s\n' "$NAMESPACE"
 	printf 'hash=%s\n' "$HASH6"
 	printf 'repo=%s\n' "$REPO_ROOT"
+}
+
+# LEASED_PORTS: newline list of "<name> <port>" records for the NAMED ports of a
+# --ports request (empty when --ports was not given). Set by
+# compute_ports_deterministic (pure) or lease_all_ports (side-effecting).
+LEASED_PORTS=""
+
+# print_extra_ports: emit one `port_<name>=<n>` line per NAMED port. No output
+# without --ports, so the plan stays byte-identical to #13 in that case.
+print_extra_ports() {
+	[ -n "$LEASED_PORTS" ] || return 0
+	printf '%s' "$LEASED_PORTS" | while IFS=' ' read -r _nm _p; do
+		[ -n "$_nm" ] || continue
+		printf 'port_%s=%s\n' "$_nm" "$_p"
+	done
+}
+
+# compute_ports_deterministic: PURE. Fill LEASED_PORTS + PORT from the
+# per-name deterministic candidates (no lease, no probe). Used by plan/env and by
+# create in --dry-run / --no-probe. Without --ports it leaves PORT as compute_plan
+# set it (byte-identical to #13).
+compute_ports_deterministic() {
+	LEASED_PORTS=""
+	_names="$(port_names_list)"
+	[ -n "$_names" ] || return 0
+	_first=""
+	for _nm in $_names; do
+		_cand="$(port_candidate "$_nm")"
+		[ -n "$_first" ] || _first="$_cand"
+		LEASED_PORTS="${LEASED_PORTS}${_nm} ${_cand}
+"
+	done
+	PORT="$_first"
 }
 
 # --- repo resolution ---------------------------------------------------------
@@ -371,37 +452,69 @@ release_alloc_lock() {
 	LOCK_MODE=""
 }
 
-# lease_free_port: under the allocation mutex, start at the deterministic $PORT
-# and walk upward within [BASE_PORT, BASE_PORT+SPAN), wrapping. The first port
-# that is neither live-leased nor a live TCP listener is claimed with a lease and
-# assigned to $PORT. Stale leases encountered on the way are reclaimed. With no
-# contention this returns the deterministic candidate unchanged (back-compat).
-lease_free_port() {
-	acquire_alloc_lock
-	start="$PORT"
-	i=0
-	cand="$start"
-	while [ "$i" -lt "$SPAN" ]; do
-		lf="$(lease_path "$cand")"
-		if lease_stale "$lf"; then
-			# Absent or reclaimable: drop any stale file, then require the port
-			# to also be free of a live TCP listener before claiming it.
-			[ -f "$lf" ] && rm -f "$lf" 2>/dev/null || true
-			if ! port_in_use "$cand"; then
-				PORT="$cand"
-				write_lease "$cand"
-				release_alloc_lock
-				return 0
-			fi
-		fi
-		i=$(( i + 1 ))
-		off=$(( (cand - BASE_PORT + 1) % SPAN ))
-		cand=$(( BASE_PORT + off ))
+# Ports claimed WITHIN the current allocation (space-separated). Consulted by
+# claim_one_port so two named ports of the SAME create never land on one number
+# even before their shared worktree exists on disk.
+CLAIMED_PORTS=""
+
+# claim_one_port $1 = start candidate. The allocation mutex MUST already be held.
+# Walk upward within [BASE_PORT, BASE_PORT+SPAN), wrapping, for a port that is not
+# already claimed in THIS allocation, not held by a live lease, and not a live TCP
+# listener; claim it with a lease and echo it. Stale leases on the way are
+# reclaimed. On exhaustion, echo the start candidate and return 1.
+claim_one_port() {
+	_start="$1"; _i=0; _cand="$_start"
+	while [ "$_i" -lt "$SPAN" ]; do
+		case " $CLAIMED_PORTS " in
+			*" $_cand "*) ;;   # already claimed in this allocation; skip
+			*)
+				_lf="$(lease_path "$_cand")"
+				if lease_stale "$_lf"; then
+					[ -f "$_lf" ] && rm -f "$_lf" 2>/dev/null || true
+					if ! port_in_use "$_cand"; then
+						write_lease "$_cand"
+						CLAIMED_PORTS="$CLAIMED_PORTS $_cand"
+						printf '%s' "$_cand"
+						return 0
+					fi
+				fi
+				;;
+		esac
+		_i=$(( _i + 1 ))
+		_off=$(( (_cand - BASE_PORT + 1) % SPAN ))
+		_cand=$(( BASE_PORT + _off ))
 	done
+	printf '%s' "$_start"
+	return 1
+}
+
+# lease_all_ports: side-effecting allocation. Under a single hold of the mutex,
+# claim a lease for the default (unnamed) port OR for each --ports name. Sets PORT
+# to the first/only leased port (bare $IT2AGENT_PORT, back-compat) and fills
+# LEASED_PORTS with the "<name> <port>" records for NAMED ports. With no
+# contention and no --ports this returns the deterministic candidate unchanged.
+lease_all_ports() {
+	acquire_alloc_lock
+	CLAIMED_PORTS=""
+	LEASED_PORTS=""
+	_names="$(port_names_list)"
+	if [ -z "$_names" ]; then
+		_p="$(claim_one_port "$PORT")" \
+			|| warn "no free/unleased port in range ${BASE_PORT}..$(( BASE_PORT + SPAN - 1 )); using deterministic candidate $PORT"
+		PORT="$_p"
+	else
+		_first=""
+		for _nm in $_names; do
+			_cand="$(port_candidate "$_nm")"
+			_p="$(claim_one_port "$_cand")" \
+				|| warn "no free/unleased port for '$_nm' in range ${BASE_PORT}..$(( BASE_PORT + SPAN - 1 )); using deterministic candidate $_cand"
+			[ -n "$_first" ] || _first="$_p"
+			LEASED_PORTS="${LEASED_PORTS}${_nm} ${_p}
+"
+		done
+		PORT="$_first"
+	fi
 	release_alloc_lock
-	warn "no free/unleased port in range ${BASE_PORT}..$(( BASE_PORT + SPAN - 1 )); using deterministic candidate $start"
-	PORT="$start"
-	return 0
 }
 
 # release_leases_for_worktree: drop every lease this repo owns whose worktree
@@ -415,6 +528,127 @@ release_leases_for_worktree() {
 		l_wt="$(sed -n 's/^worktree=//p' "$lf" 2>/dev/null | head -1)"
 		if [ "$l_wt" = "$WORKTREE" ]; then
 			rm -f "$lf" 2>/dev/null || true
+		fi
+	done
+	release_alloc_lock
+}
+
+# --- canonical port (item 4): a per-(repo, port-name) SINGLETON lease ---------
+# Beyond the always-unique dynamic port, an agent may additionally hold the
+# project's NORMAL dev port (e.g. 3000) for a named port, so the "focused" agent
+# answers on the address of record. Exactly one agent per repo holds each name's
+# canonical value at a time. We HAND OVER THE NUMBER (exported as
+# IT2AGENT_CANONICAL_PORT_<NAME>); we do NOT proxy/forward traffic — that is
+# future daemon work (#3). Stored beside the dynamic leases as
+# <LEASES_DIR>/canonical-<name>.lease, with the same stale-reclaim rule
+# (worktree gone, or a positive owner pid that is dead — see lease_stale).
+#
+# Self-gated on agent.canonical_port: the caller only invokes these when
+# canonical_gate_open is true (fail-safe OFF, bypassable with --no-gate /
+# IT2AGENT_FORCE for tests). Reuses the dynamic allocation mutex so acquisition
+# is atomic against concurrent spawns.
+
+canonical_gate_open() {
+	[ "${IT2AGENT_FORCE:-}" = "1" ] && return 0
+	[ "$NO_GATE" = "1" ] && return 0
+	flag="$(find_flag 2>/dev/null)" || return 1
+	"$flag" "$FLAG_KEY_CANONICAL" >/dev/null 2>&1
+}
+
+canonical_lease_path() {
+	printf '%s/canonical-%s.lease' "$LEASES_DIR" "$1"
+}
+
+# canonical_names: the port names the canonical feature operates on — the --ports
+# names when given, else a single implicit "web" (so a bare spawn with the flag ON
+# still has a name to key IT2AGENT_CANONICAL_PORT_WEB on, without perturbing the
+# dynamic single-port back-compat path).
+canonical_names() {
+	_n="$(port_names_list)"
+	if [ -n "$_n" ]; then
+		printf '%s' "$_n"
+	else
+		printf 'web\n'
+	fi
+}
+
+# CANONICAL_RESULT: newline "<name> <canonical-port>" records this agent holds
+# after acquire_all_canonical (empty for names a live peer already owns).
+CANONICAL_RESULT=""
+
+# acquire_all_canonical: under the mutex, try to take each canonical name for this
+# agent. A name is taken when its lease is absent, stale, already ours (same
+# worktree — idempotent re-spawn), or when --canonical-takeover forces a handover;
+# otherwise it is left with its current live owner (singleton). The canonical
+# number is CANONICAL_BASE + index-of-name.
+acquire_all_canonical() {
+	acquire_alloc_lock
+	CANONICAL_RESULT=""
+	_idx=0
+	_epoch="$(date +%s 2>/dev/null || echo 0)"
+	for _nm in $(canonical_names); do
+		_cp=$(( CANONICAL_BASE + _idx ))
+		_idx=$(( _idx + 1 ))
+		_lf="$(canonical_lease_path "$_nm")"
+		_take=0
+		if [ ! -f "$_lf" ]; then
+			_take=1
+		else
+			_owner_wt="$(sed -n 's/^worktree=//p' "$_lf" 2>/dev/null | head -1)"
+			if [ "$_owner_wt" = "$WORKTREE" ]; then _take=1
+			elif lease_stale "$_lf"; then _take=1
+			elif [ "$CANONICAL_TAKEOVER" = "1" ]; then _take=1
+			fi
+		fi
+		if [ "$_take" = "1" ]; then
+			{
+				printf 'id=%s\n' "$AGENT_ID"
+				printf 'repo=%s\n' "$REPO_ROOT"
+				printf 'pid=%s\n' "$LEASE_PID"
+				printf 'epoch=%s\n' "$_epoch"
+				printf 'worktree=%s\n' "$WORKTREE"
+				printf 'canonical=%s\n' "$_cp"
+			} > "$_lf"
+			CANONICAL_RESULT="${CANONICAL_RESULT}${_nm} ${_cp}
+"
+		fi
+	done
+	release_alloc_lock
+}
+
+# compute_canonical_deterministic: PURE preview of which canonical numbers WOULD
+# be handed out (base + index per name), with no lease and no singleton check.
+# Used only in --dry-run so the plan is complete for the wrappers to preview.
+compute_canonical_deterministic() {
+	CANONICAL_RESULT=""
+	_idx=0
+	for _nm in $(canonical_names); do
+		_cp=$(( CANONICAL_BASE + _idx ))
+		_idx=$(( _idx + 1 ))
+		CANONICAL_RESULT="${CANONICAL_RESULT}${_nm} ${_cp}
+"
+	done
+}
+
+# print_canonical: emit one `canonical_port_<name>=<n>` line per held name.
+print_canonical() {
+	[ -n "$CANONICAL_RESULT" ] || return 0
+	printf '%s' "$CANONICAL_RESULT" | while IFS=' ' read -r _nm _p; do
+		[ -n "$_nm" ] || continue
+		printf 'canonical_port_%s=%s\n' "$_nm" "$_p"
+	done
+}
+
+# release_canonical_for_worktree: drop every canonical lease this worktree holds,
+# handing each name back so another agent can take it.
+release_canonical_for_worktree() {
+	[ -d "$LEASES_DIR" ] || return 0
+	acquire_alloc_lock
+	for _lf in "$LEASES_DIR"/canonical-*.lease; do
+		[ -f "$_lf" ] || continue
+		_owner_wt="$(sed -n 's/^worktree=//p' "$_lf" 2>/dev/null | head -1)"
+		if [ "$_owner_wt" = "$WORKTREE" ]; then
+			rm -f "$_lf" 2>/dev/null || true
 		fi
 	done
 	release_alloc_lock
@@ -437,21 +671,39 @@ run_git() {
 cmd_create() {
 	compute_plan
 
-	# Claim a free port under the allocation lease only when actually creating
+	# Claim free port(s) under the allocation lease only when actually creating
 	# (not in dry-run, so the printed plan stays deterministic and reproducible
-	# on any machine). --no-probe forces the deterministic port as-is with no
-	# lease (back-compat: the value is exactly the pure plan's).
+	# on any machine). --no-probe forces the deterministic port(s) as-is with no
+	# lease (back-compat: the value is exactly the pure plan's). --ports adds one
+	# leased port per name; without it there is exactly one port, as in #13.
 	if [ "$DRYRUN" != "1" ] && [ "$NO_PROBE" != "1" ]; then
-		lease_free_port
+		lease_all_ports
+	else
+		compute_ports_deterministic
 	fi
 
 	# Emit the allocation FIRST so callers can capture values regardless of what
 	# the git layer prints afterwards.
 	print_plan
+	print_extra_ports
+
+	# Canonical port (item 4): self-gated on agent.canonical_port. When ON, also
+	# try to hold the project-normal port for each name and export it. Only one
+	# agent per repo holds each name at a time (singleton).
+	if canonical_gate_open; then
+		if [ "$DRYRUN" = "1" ]; then
+			compute_canonical_deterministic
+			print_canonical
+			printf 'would-run: acquire canonical singleton lease(s) under %s\n' "$LEASES_DIR"
+		else
+			acquire_all_canonical
+			print_canonical
+		fi
+	fi
 
 	if [ "$DRYRUN" = "1" ]; then
 		printf 'would-run: mkdir -p %s\n' "$(dirname "$WORKTREE")"
-		[ "$NO_PROBE" != "1" ] && printf 'would-run: lease port under %s (advancing on conflict)\n' "$LEASES_DIR"
+		[ "$NO_PROBE" != "1" ] && printf 'would-run: lease port(s) under %s (advancing on conflict)\n' "$LEASES_DIR"
 	else
 		mkdir -p "$(dirname "$WORKTREE")" || die "cannot create worktree parent: $(dirname "$WORKTREE")"
 	fi
@@ -511,7 +763,7 @@ cmd_cleanup() {
 		printf 'would-run: git -C %s worktree remove %s\n' "$REPO_ROOT" "$WORKTREE"
 		printf 'would-run: git -C %s branch -d %s\n' "$REPO_ROOT" "$BRANCH"
 		printf 'would-run: git -C %s worktree prune\n' "$REPO_ROOT"
-		printf 'would-run: release port lease(s) for %s under %s\n' "$WORKTREE" "$LEASES_DIR"
+		printf 'would-run: release port lease(s) + canonical lease(s) for %s under %s\n' "$WORKTREE" "$LEASES_DIR"
 		return 0
 	fi
 
@@ -531,6 +783,7 @@ cmd_cleanup() {
 		git -C "$REPO_ROOT" worktree prune >&2 2>/dev/null || true
 		# Still release any lingering lease so a removed worktree never leaks one.
 		release_leases_for_worktree
+		release_canonical_for_worktree
 		return 0
 	fi
 
@@ -583,19 +836,45 @@ cmd_cleanup() {
 		fi
 	fi
 	git -C "$REPO_ROOT" worktree prune >&2 2>/dev/null || true
-	# Release the port lease(s) this worktree held so the port returns to the pool.
+	# Release the port lease(s) this worktree held so the port returns to the pool,
+	# plus any canonical singleton it held so another agent can take it.
 	release_leases_for_worktree
+	release_canonical_for_worktree
 	warn "removed worktree $WORKTREE and branch $BRANCH"
 }
 
 # --- env ---------------------------------------------------------------------
-# Print eval-able export lines for the spawned session. Pure (no git, no gate).
+# Print eval-able export lines for the spawned session. Pure (no git, no gate,
+# no lease). With --ports each name is exported as IT2AGENT_PORT_<UPPER>, and the
+# first is also the bare IT2AGENT_PORT (back-compat). Canonical ports are stateful
+# (singleton lease) so they are NOT part of the pure env — they come from create.
 cmd_env() {
 	compute_plan
+	compute_ports_deterministic
 	printf 'export IT2AGENT_PORT=%s\n' "$PORT"
+	if [ -n "$LEASED_PORTS" ]; then
+		printf '%s' "$LEASED_PORTS" | while IFS=' ' read -r _nm _p; do
+			[ -n "$_nm" ] || continue
+			printf 'export IT2AGENT_PORT_%s=%s\n' "$(portkey "$_nm")" "$_p"
+		done
+	fi
 	printf 'export IT2AGENT_NS=%s\n' "$NAMESPACE"
 	printf 'export IT2AGENT_WORKTREE=%s\n' "$WORKTREE"
 	printf 'export IT2AGENT_BRANCH=%s\n' "$BRANCH"
+}
+
+# --- canonical (item 4 explicit management) ----------------------------------
+# Acquire (default) or --release the per-(repo, port-name) canonical singleton
+# for this agent, independent of create. Self-gates on agent.canonical_port.
+cmd_canonical() {
+	compute_plan
+	if [ "$RELEASE" = "1" ]; then
+		release_canonical_for_worktree
+		printf 'canonical_released=%s\n' "$WORKTREE"
+		return 0
+	fi
+	acquire_all_canonical
+	print_canonical
 }
 
 # --- ls / status (read-only observability reporter) --------------------------
@@ -607,34 +886,45 @@ cmd_env() {
 # dead — the same reclaim rule the allocator uses in lease_stale) are only
 # REPORTED, never deleted.
 
-# lease_owner_for_worktree <worktree-path>: prints "<port> <pid>" for the lease
-# whose worktree matches, else nothing. Read-only scan of LEASES_DIR.
-lease_owner_for_worktree() {
+# leases_for_worktree <worktree-path>: scan LEASES_DIR (read-only) for every lease
+# whose worktree matches, and set:
+#   _WT_PORTS = comma-joined dynamic port numbers (all N of a --ports agent)
+#   _WT_CANON = comma-joined canonical port numbers this worktree holds
+#   _WT_PID   = an owner pid observed on a dynamic lease (0 if none/untracked)
+# Dynamic leases are `<port>.lease`; canonical leases are `canonical-<name>.lease`.
+leases_for_worktree() {
+	_WT_PORTS=""; _WT_CANON=""; _WT_PID=0
 	[ -d "$LEASES_DIR" ] || return 0
 	for lf in "$LEASES_DIR"/*.lease; do
 		[ -f "$lf" ] || continue
 		l_wt="$(sed -n 's/^worktree=//p' "$lf" 2>/dev/null | head -1)"
-		if [ "$l_wt" = "$1" ]; then
-			l_port="$(basename "$lf" .lease)"
-			l_pid="$(sed -n 's/^pid=//p' "$lf" 2>/dev/null | head -1)"
-			printf '%s %s' "$l_port" "${l_pid:-0}"
-			return 0
-		fi
+		[ "$l_wt" = "$1" ] || continue
+		base="$(basename "$lf" .lease)"
+		case "$base" in
+			canonical-*)
+				l_cp="$(sed -n 's/^canonical=//p' "$lf" 2>/dev/null | head -1)"
+				[ -n "$l_cp" ] && _WT_CANON="${_WT_CANON:+$_WT_CANON,}$l_cp"
+				;;
+			*)
+				_WT_PORTS="${_WT_PORTS:+$_WT_PORTS,}$base"
+				l_pid="$(sed -n 's/^pid=//p' "$lf" 2>/dev/null | head -1)"
+				[ -n "$l_pid" ] && _WT_PID="$l_pid"
+				;;
+		esac
 	done
 }
 
 # emit_record <worktree-path> <branch>: print one REC_SEP-separated record
-#   branch  worktree  port  changes  stale  reason
-# port is empty when unleased; changes is empty when the worktree dir is gone;
-# stale is 0/1; reason is "" / worktree-gone / owner-dead.
+#   branch  worktree  port  ports  canonical  changes  stale  reason
+# port is the first dynamic port (back-compat; empty when unleased); ports is the
+# comma list of ALL dynamic ports; canonical is the comma list of canonical ports
+# held; changes is empty when the worktree dir is gone; stale is 0/1; reason is
+# "" / worktree-gone / owner-dead.
 emit_record() {
 	_wt="$1"; _br="$2"
-	_port=""; _pid=0
-	_owner="$(lease_owner_for_worktree "$_wt")"
-	if [ -n "$_owner" ]; then
-		_port="${_owner% *}"
-		_pid="${_owner#* }"
-	fi
+	leases_for_worktree "$_wt"
+	_ports="$_WT_PORTS"; _canon="$_WT_CANON"; _pid="$_WT_PID"
+	_port="${_ports%%,*}"   # first dynamic port (empty when none)
 	_stale=0; _reason=""; _changes=""
 	if [ ! -d "$_wt" ]; then
 		_stale=1; _reason="worktree-gone"
@@ -644,8 +934,9 @@ emit_record() {
 			_stale=1; _reason="owner-dead"
 		fi
 	fi
-	printf '%s%s%s%s%s%s%s%s%s%s%s\n' \
+	printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
 		"$_br" "$REC_SEP" "$_wt" "$REC_SEP" "$_port" "$REC_SEP" \
+		"$_ports" "$REC_SEP" "$_canon" "$REC_SEP" \
 		"$_changes" "$REC_SEP" "$_stale" "$REC_SEP" "$_reason"
 }
 
@@ -679,25 +970,39 @@ jstrn() { if [ -z "$1" ]; then printf 'null'; else printf '"%s"' "$(json_escape 
 jnum() { if [ -z "$1" ]; then printf 'null'; else printf '%s' "$1"; fi; }
 jbool() { if [ "$1" = "1" ]; then printf 'true'; else printf 'false'; fi; }
 
+# jnum_array <comma-list>: render a comma list of numbers as a JSON array. Empty
+# input -> []. No quoting: the members are always integers.
+jnum_array() {
+	printf '['
+	_f=1; _old="$IFS"; IFS=','
+	for _v in $1; do
+		[ "$_f" = "1" ] || printf ','
+		_f=0; printf '%s' "$_v"
+	done
+	IFS="$_old"
+	printf ']'
+}
+
 render_json() {
 	printf '['
 	first=1
-	printf '%s\n' "$RECORDS" | while IFS="$REC_SEP" read -r br wt port changes stale reason; do
+	printf '%s\n' "$RECORDS" | while IFS="$REC_SEP" read -r br wt port ports canon changes stale reason; do
 		[ "$first" = "1" ] || printf ','
 		first=0
 		if [ -z "$changes" ]; then clean=null
 		elif [ "$changes" = "0" ]; then clean=true
 		else clean=false; fi
-		printf '{"branch":%s,"worktree":%s,"port":%s,"changes":%s,"clean":%s,"stale":%s,"stale_reason":%s}' \
-			"$(jstr "$br")" "$(jstr "$wt")" "$(jnum "$port")" "$(jnum "$changes")" \
+		printf '{"branch":%s,"worktree":%s,"port":%s,"ports":%s,"canonical":%s,"changes":%s,"clean":%s,"stale":%s,"stale_reason":%s}' \
+			"$(jstr "$br")" "$(jstr "$wt")" "$(jnum "$port")" "$(jnum_array "$ports")" \
+			"$(jnum_array "$canon")" "$(jnum "$changes")" \
 			"$clean" "$(jbool "$stale")" "$(jstrn "$reason")"
 	done
 	printf ']\n'
 }
 
 render_table() {
-	printf '%-42s  %-6s  %-13s  %-16s  %s\n' BRANCH PORT STATUS STALE WORKTREE
-	printf '%s\n' "$RECORDS" | while IFS="$REC_SEP" read -r br wt port changes stale reason; do
+	printf '%-42s  %-13s  %-8s  %-13s  %-16s  %s\n' BRANCH PORTS CANON STATUS STALE WORKTREE
+	printf '%s\n' "$RECORDS" | while IFS="$REC_SEP" read -r br wt port ports canon changes stale reason; do
 		if [ "$reason" = "worktree-gone" ]; then st="gone"
 		elif [ -z "$changes" ]; then st="-"
 		elif [ "$changes" = "0" ]; then st="clean"
@@ -705,7 +1010,7 @@ render_table() {
 		else st="$changes changes"; fi
 		smark="-"
 		[ "$stale" = "1" ] && smark="STALE ($reason)"
-		printf '%-42s  %-6s  %-13s  %-16s  %s\n' "$br" "${port:--}" "$st" "$smark" "$wt"
+		printf '%-42s  %-13s  %-8s  %-13s  %-16s  %s\n' "$br" "${ports:--}" "${canon:--}" "$st" "$smark" "$wt"
 	done
 }
 
@@ -750,8 +1055,11 @@ Commands:
              worktree path. Composes git worktree list + .leases + git status;
              allocates nothing and never deletes/reclaims.
   status     Same data as \`ls\`; add --json for a machine-readable array (stable
-             keys: branch, worktree, port, changes, clean, stale, stale_reason)
-             for the janitor / daemon / MCP to consume.
+             keys: branch, worktree, port, ports, canonical, changes, clean,
+             stale, stale_reason) for the janitor / daemon / MCP to consume.
+  canonical  Acquire (or --release) the per-(repo, port-name) CANONICAL singleton
+             for this agent (gated on $FLAG_KEY_CANONICAL). Prints
+             canonical_port_<name>=<n> for each name held.
   -h,--help  Show this help.
 
 Common options:
@@ -763,6 +1071,10 @@ Common options:
   --base-port <n>    Base of the port range (default: $DEFAULT_BASE_PORT).
   --span <n>         Size of the port range (default: $DEFAULT_SPAN).
                      Deterministic port = base + (hash % span).
+  --ports <a,b,c>    Allocate one dynamic port PER NAME, each exported as
+                     IT2AGENT_PORT_<UPPER> (first is also the bare IT2AGENT_PORT,
+                     back-compat). Each name folds into its hash so they don't
+                     collide. Without --ports there is exactly one port, as in #13.
 
 create options:
   --dry-run          Print the git commands + allocation; execute nothing.
@@ -771,7 +1083,20 @@ create options:
   --lease-pid <n>    Bind the port lease to a durable process pid so it is
                      reclaimed when that process dies (default 0 = the lease is
                      tied to the worktree only).
+  --canonical-port <base>
+                     Base for the canonical number handed out per name (default
+                     $DEFAULT_CANONICAL_BASE; first name -> base, second -> base+1, …).
+  --canonical-takeover
+                     When acquiring a canonical name already held by a live agent,
+                     hand it over instead of leaving it (default: leave it).
   --no-gate          Bypass the feature-flag gate (local testing).
+
+canonical options:
+  --ports <a,b,c>    Names to hold the canonical singleton for (default: web).
+  --canonical-port <base>   Canonical base (see above).
+  --canonical-takeover      Force a handover from the current live holder.
+  --release          Hand back every canonical name this agent holds.
+  --no-gate          Bypass the $FLAG_KEY_CANONICAL gate (local testing).
 
 cleanup options:
   --base <ref>       Branch to test "merged into" against (default: auto-detect
@@ -802,7 +1127,7 @@ EOF
 CMD="$1"; shift
 case "$CMD" in
 	-h|--help|help) usage; exit 0 ;;
-	plan|env|create|cleanup|ls|status) ;;
+	plan|env|create|cleanup|ls|status|canonical) ;;
 	*) die "unknown command: $CMD (try --help)" ;;
 esac
 
@@ -819,6 +1144,10 @@ FORCE=0
 BASE_REF=""
 LEASE_PID=0
 JSON=0
+PORTS_CSV=""
+CANONICAL_BASE="$DEFAULT_CANONICAL_BASE"
+CANONICAL_TAKEOVER=0
+RELEASE=0
 
 [ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
 
@@ -838,6 +1167,12 @@ while [ $# -gt 0 ]; do
 		--span=*) SPAN="${1#--span=}"; shift ;;
 		--base) [ $# -ge 2 ] || die "--base requires a <ref>"; BASE_REF="$2"; shift 2 ;;
 		--base=*) BASE_REF="${1#--base=}"; shift ;;
+		--ports) [ $# -ge 2 ] || die "--ports requires a comma-separated list"; PORTS_CSV="$2"; shift 2 ;;
+		--ports=*) PORTS_CSV="${1#--ports=}"; shift ;;
+		--canonical-port) [ $# -ge 2 ] || die "--canonical-port requires a value"; CANONICAL_BASE="$2"; shift 2 ;;
+		--canonical-port=*) CANONICAL_BASE="${1#--canonical-port=}"; shift ;;
+		--canonical-takeover) CANONICAL_TAKEOVER=1; shift ;;
+		--release) RELEASE=1; shift ;;
 		--dry-run) DRYRUN=1; shift ;;
 		--no-gate) NO_GATE=1; shift ;;
 		--no-probe) NO_PROBE=1; shift ;;
@@ -853,19 +1188,29 @@ while [ $# -gt 0 ]; do
 done
 
 is_uint "$LEASE_PID" || die "--lease-pid must be a non-negative integer"
+is_uint "$CANONICAL_BASE" || die "--canonical-port must be a non-negative integer"
 
 resolve_repo "$REPO_ARG"
 
 case "$CMD" in
 	plan)
 		compute_plan
+		compute_ports_deterministic
 		print_plan
+		print_extra_ports
 		;;
 	env)
 		cmd_env
 		;;
 	ls|status)
 		cmd_report
+		;;
+	canonical)
+		if ! canonical_gate_open; then
+			warn "gate closed ($FLAG_KEY_CANONICAL is OFF); canonical port not touched"
+			exit 0
+		fi
+		cmd_canonical
 		;;
 	create)
 		if ! gate_open; then

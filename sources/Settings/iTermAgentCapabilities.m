@@ -44,7 +44,8 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                          @"menubar",
                          @"codex_status",
                          @"native_status",
-                         @"team_bridge" ];
+                         @"team_bridge",
+                         @"canonical_port" ];
     });
     return identifiers;
 }
@@ -80,7 +81,8 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                    @"menubar": @"AI Agent Menu Bar",
                    @"codex_status": @"Codex Tab Status",
                    @"native_status": @"Native Tab Status",
-                   @"team_bridge": @"Team Bridge" };
+                   @"team_bridge": @"Team Bridge",
+                   @"canonical_port": @"Canonical Port" };
     });
     NSString *name = names[capability];
     if (name) {
@@ -112,7 +114,8 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                           @"menubar": @"Adds a menu-bar item with a live count of busy AI agents.",
                           @"codex_status": @"Shows Codex CLI working/idle activity in the tab status.",
                           @"native_status": @"Publishes agent state to iTerm2’s native tab status and Cockpit via OSC 21337.",
-                          @"team_bridge": @"Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session’s death." };
+                          @"team_bridge": @"Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session’s death.",
+                          @"canonical_port": @"The focused agent also answers on the normal localhost port (e.g. 3000), not just its dynamic one." };
     });
     NSString *description = descriptions[capability];
     return description ?: @"";

@@ -128,6 +128,14 @@ Worktree + port/namespace isolation (issue #13 — gated OFF by default):
                    Defaults to "<role>-<task>" (or "<role>"/"<task>") when
                    isolation is ON and --id is omitted.
   --base-port <n>  Base of the per-agent port range (default 41000).
+  --ports <a,b,c>  Allocate one dynamic port per name, exported as
+                   IT2AGENT_PORT_<UPPER> (first is also the bare IT2AGENT_PORT).
+                   Without it there is exactly one port, as in #13.
+  --canonical-port <base>
+                   Base for the canonical (project-normal) port handed to the
+                   holder when the "agent.canonical_port" flag is ON (default 3000).
+  --canonical-takeover
+                   Take a canonical name already held by a live agent.
   --no-probe       Skip free-port probing; use the deterministic port as-is.
   --force-isolation
                    Force worktree/port isolation ON even when the
@@ -181,6 +189,9 @@ TASK=""
 STATUS="busy"
 AGENT_ID=""
 BASE_PORT=""
+PORTS=""            # --ports web,db,cache (empty => single port, = #13)
+CANONICAL_PORT=""   # --canonical-port <base> (passthrough to the helper)
+CANONICAL_TAKEOVER=0
 NO_PROBE=0
 NO_GATE=0
 NO_GUIDE=0
@@ -233,6 +244,18 @@ while [ $# -gt 0 ]; do
 			BASE_PORT="$2"; shift 2 ;;
 		--base-port=*)
 			BASE_PORT="${1#--base-port=}"; shift ;;
+		--ports)
+			[ $# -ge 2 ] || die "--ports requires a comma-separated list"
+			PORTS="$2"; shift 2 ;;
+		--ports=*)
+			PORTS="${1#--ports=}"; shift ;;
+		--canonical-port)
+			[ $# -ge 2 ] || die "--canonical-port requires a value"
+			CANONICAL_PORT="$2"; shift 2 ;;
+		--canonical-port=*)
+			CANONICAL_PORT="${1#--canonical-port=}"; shift ;;
+		--canonical-takeover)
+			CANONICAL_TAKEOVER=1; shift ;;
 		--no-probe)
 			NO_PROBE=1; shift ;;
 		--no-gate)
@@ -362,6 +385,9 @@ if iso_gate_open; then
 	[ -n "$ROLE" ] && set -- "$@" --role "$ROLE"
 	[ -n "$TASK" ] && set -- "$@" --task "$TASK"
 	[ -n "$BASE_PORT" ] && set -- "$@" --base-port "$BASE_PORT"
+	[ -n "$PORTS" ] && set -- "$@" --ports "$PORTS"
+	[ -n "$CANONICAL_PORT" ] && set -- "$@" --canonical-port "$CANONICAL_PORT"
+	[ "$CANONICAL_TAKEOVER" = "1" ] && set -- "$@" --canonical-takeover
 	[ "$NO_PROBE" = "1" ] && set -- "$@" --no-probe
 	[ "$ISO_FORCED" = "1" ] && set -- "$@" --no-gate
 	[ "$DRYRUN" = "1" ] && set -- "$@" --dry-run
@@ -381,9 +407,28 @@ if iso_gate_open; then
 	# The worktree becomes the working directory (replacing plain cwd inheritance).
 	CWD="$ISO_WORKTREE"
 
+	# Any NAMED port (--ports) and CANONICAL port the helper emitted become
+	# additional exports. We blindly turn each `port_<name>=` / `canonical_port_<name>=`
+	# plan line into IT2AGENT_PORT_<UPPER> / IT2AGENT_CANONICAL_PORT_<UPPER>. When
+	# --ports was not given there are none, so this is empty (= #13).
+	iso_extra_exports() {
+		printf '%s\n' "$ISOLATION_PLAN" | while IFS= read -r line; do
+			case "$line" in
+				port_*=*)
+					nm="${line%%=*}"; nm="${nm#port_}"; v="${line#*=}"
+					printf 'export IT2AGENT_PORT_%s=%s\n' "$(printf '%s' "$nm" | tr '[:lower:]' '[:upper:]')" "$(shq "$v")" ;;
+				canonical_port_*=*)
+					nm="${line%%=*}"; nm="${nm#canonical_port_}"; v="${line#*=}"
+					printf 'export IT2AGENT_CANONICAL_PORT_%s=%s\n' "$(printf '%s' "$nm" | tr '[:lower:]' '[:upper:]')" "$(shq "$v")" ;;
+			esac
+		done
+	}
+	ISO_EXTRA="$(iso_extra_exports)"
+
 	# Exports written into the new session BEFORE the command runs.
 	ISOLATION_EXPORTS="export IT2AGENT_PORT=$(shq "$ISO_PORT")
-export IT2AGENT_NS=$(shq "$ISO_NS")
+${ISO_EXTRA:+$ISO_EXTRA
+}export IT2AGENT_NS=$(shq "$ISO_NS")
 export IT2AGENT_WORKTREE=$(shq "$ISO_WORKTREE")
 export IT2AGENT_BRANCH=$(shq "$ISO_BRANCH")
 "

@@ -349,6 +349,91 @@ assert_exit "ls outside a git repo exits 2"     2 sh "$WT" ls     --repo "$TMP"
 assert_exit "status outside a git repo exits 2" 2 sh "$WT" status --repo "$TMP" --json
 
 echo
+echo "--- 9. multi-port (--ports): N leases + N exports, first aliased (item 3) ---"
+export IT2AGENT_NO_TCP_PROBE=1
+mp="$(sh "$WT" create --repo "$REPO" --id multi1 --role worker --ports web,db,cache --no-gate 2>/dev/null)"
+mp_br="$(val branch "$mp")"; mp_wt="$(val worktree "$mp")"
+mp_web="$(val port_web "$mp")"; mp_db="$(val port_db "$mp")"; mp_cache="$(val port_cache "$mp")"
+[ -n "$mp_web" ]   && green "port_web present ($mp_web)"     || red "port_web missing"
+[ -n "$mp_db" ]    && green "port_db present ($mp_db)"       || red "port_db missing"
+[ -n "$mp_cache" ] && green "port_cache present ($mp_cache)" || red "port_cache missing"
+assert_eq "bare port aliases the FIRST named port (web)" "$mp_web" "$(val port "$mp")"
+# distinct numbers so services never collide within one agent
+if [ "$mp_web" != "$mp_db" ] && [ "$mp_db" != "$mp_cache" ] && [ "$mp_web" != "$mp_cache" ]; then
+	green "the three named ports are distinct ($mp_web/$mp_db/$mp_cache)"
+else
+	red "named ports collided ($mp_web/$mp_db/$mp_cache)"
+fi
+# exactly three dynamic leases for this worktree (canonical leases excluded)
+nleases="$(grep -lF "worktree=$mp_wt" "$TMP/wt/.leases"/*.lease 2>/dev/null | grep -c -v 'canonical-')"
+[ "$nleases" = "3" ] && green "3 dynamic leases written for the 3 named ports" || red "want 3 leases, got $nleases"
+# env exports each IT2AGENT_PORT_<UPPER> plus the bare alias
+mpenv="$(sh "$WT" env --repo "$REPO" --id multi1 --role worker --ports web,db,cache)"
+assert_contains "env exports IT2AGENT_PORT_WEB"   "export IT2AGENT_PORT_WEB="   "$mpenv"
+assert_contains "env exports IT2AGENT_PORT_DB"    "export IT2AGENT_PORT_DB="    "$mpenv"
+assert_contains "env exports IT2AGENT_PORT_CACHE" "export IT2AGENT_PORT_CACHE=" "$mpenv"
+assert_contains "env still exports the bare IT2AGENT_PORT (back-compat)" "export IT2AGENT_PORT=" "$mpenv"
+# no --ports -> exactly one port, no port_<name> lines (byte-compat with #13)
+sp="$(sh "$WT" create --repo "$REPO" --id single1 --role worker --no-gate 2>/dev/null)"
+assert_not_contains "no --ports: emits no port_<name> lines" "port_" "$sp"
+# ls / status list ALL N ports for the multi-port agent
+mptbl="$(sh "$WT" ls --repo "$REPO")"
+mpline="$(printf '%s\n' "$mptbl" | grep -F "$mp_br")"
+assert_contains "ls lists web port for the multi agent"   "$mp_web"   "$mpline"
+assert_contains "ls lists db port for the multi agent"    "$mp_db"    "$mpline"
+assert_contains "ls lists cache port for the multi agent" "$mp_cache" "$mpline"
+mpjson="$(sh "$WT" status --repo "$REPO" --json)"
+mpobj="$(printf '%s' "$mpjson" | grep -oE '\{[^}]*\}' | grep -F "\"branch\":\"$mp_br\"")"
+assert_contains "status --json exposes a ports array" "\"ports\":[" "$mpobj"
+assert_contains "status --json ports array lists web"   "$mp_web"   "$mpobj"
+assert_contains "status --json ports array lists cache" "$mp_cache" "$mpobj"
+
+echo
+echo "--- 10. canonical port (--ports, agent.canonical_port): singleton + gate (item 4) ---"
+# Fresh repo + worktree root so the canonical singleton starts unheld (earlier
+# --no-gate creates bypass BOTH gates and would otherwise have grabbed the default
+# canonical-web lease). Gate via a config we control: worktree_isolation ON so
+# create runs; canonical OFF first, then ON. NO --no-gate here (that would bypass
+# BOTH gates), so this genuinely exercises the canonical self-gate.
+CANREPO="$TMP/canrepo"
+mkdir -p "$CANREPO"
+git -C "$CANREPO" init -q
+git -C "$CANREPO" symbolic-ref HEAD refs/heads/main
+git -C "$CANREPO" config user.email t@example.com
+git -C "$CANREPO" config user.name test
+printf 'x\n' > "$CANREPO/f"; git -C "$CANREPO" add f; git -C "$CANREPO" commit -qm init
+REPO="$CANREPO"
+export IT2AGENT_WORKTREE_ROOT="$TMP/canwt"
+CANCFG="$TMP/cancfg.toml"
+export IT2AGENT_CONFIG="$CANCFG"
+FLAGBIN="$SPAWN_DIR/../flags/it2agent-flag"
+"$FLAGBIN" enable agent.worktree_isolation >/dev/null 2>&1
+# flag OFF -> create allocates ports but exports NO canonical.
+canoff="$(sh "$WT" create --repo "$REPO" --id can_off --role worker --ports web 2>/dev/null)"
+assert_not_contains "canonical flag OFF: no canonical export" "canonical_port_" "$canoff"
+# flag ON -> the first agent (A) takes canonical web at the base (3000).
+"$FLAGBIN" enable agent.canonical_port >/dev/null 2>&1
+canA="$(sh "$WT" create --repo "$REPO" --id can_A --role worker --ports web 2>/dev/null)"
+assert_contains "flag ON: agent A gets canonical web (=3000)" "canonical_port_web=3000" "$canA"
+# a SECOND agent (B) must NOT get canonical web while A holds it (singleton).
+canB="$(sh "$WT" create --repo "$REPO" --id can_B --role worker --ports web 2>/dev/null)"
+assert_not_contains "singleton: agent B does NOT get canonical web while A holds it" "canonical_port_web" "$canB"
+# A releases -> B can now take it.
+sh "$WT" canonical --repo "$REPO" --id can_A --role worker --ports web --release >/dev/null 2>&1
+canB2="$(sh "$WT" canonical --repo "$REPO" --id can_B --role worker --ports web 2>/dev/null)"
+assert_contains "after A --release, agent B acquires canonical web" "canonical_port_web=3000" "$canB2"
+# custom canonical base is honored.
+"$FLAGBIN" enable agent.canonical_port >/dev/null 2>&1
+canBase="$(sh "$WT" create --repo "$REPO" --id can_base --role worker --ports api --canonical-port 8080 2>/dev/null)"
+assert_contains "custom --canonical-port base honored" "canonical_port_api=8080" "$canBase"
+# canonical shows up in ls / status for the holder.
+cantbl="$(sh "$WT" ls --repo "$REPO")"
+canline="$(printf '%s\n' "$cantbl" | grep -F "$(val branch "$canBase")")"
+assert_contains "ls shows the canonical port for its holder" "8080" "$canline"
+unset IT2AGENT_CONFIG
+unset IT2AGENT_NO_TCP_PROBE
+
+echo
 echo "--- 6. exit codes / usage ---"
 assert_exit "--help exits 0"                 0 sh "$WT" --help
 assert_exit "missing command exits 2"        2 sh "$WT"

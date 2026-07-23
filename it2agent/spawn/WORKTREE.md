@@ -23,7 +23,9 @@ When `agent.worktree_isolation` is **ON**, spawning an agent:
 
    | Env var | Meaning | Example |
    | --- | --- | --- |
-   | `$IT2AGENT_PORT` | The agent's dedicated TCP port. | `41724` |
+   | `$IT2AGENT_PORT` | The agent's dedicated TCP port (with `--ports`, the first named port). | `41724` |
+   | `$IT2AGENT_PORT_<NAME>` | One per `--ports` name (multi-port only). | `IT2AGENT_PORT_DB=41903` |
+   | `$IT2AGENT_CANONICAL_PORT_<NAME>` | The canonical (project-normal) port, only for the agent currently holding it (`agent.canonical_port` ON). | `IT2AGENT_CANONICAL_PORT_WEB=3000` |
    | `$IT2AGENT_NS` | Service/DB/schema prefix, safe as an identifier. | `worker_d8763d` |
    | `$IT2AGENT_WORKTREE` | Absolute path of the agent's worktree. | `…/worker-13-d8763d` |
    | `$IT2AGENT_BRANCH` | The agent's branch. | `it2agent/worker-13-d8763d` |
@@ -127,6 +129,70 @@ check-and-claim is therefore atomic across concurrent spawns of the same repo.
   removes (matching on identity, since the claimed port may have advanced past
   the deterministic candidate). This is where an explicit teardown hooks in.
 
+### Multiple ports (`--ports`)
+
+A realistic stack wants more than one port (web + db + cache). `--ports` allocates
+one dynamic port **per name** — no new flag, and inert unless you pass it:
+
+```sh
+it2agent-worktree create --repo . --id 13 --role worker --ports web,db,cache
+# branch=…  worktree=…  port=41724   # bare = the FIRST named port (back-compat)
+# port_web=41724
+# port_db=41903
+# port_cache=41255
+```
+
+- Each name gets its own deterministic candidate `base + (int(first 7 hex of
+  sha1("<repo>|<id>|<name>")) % span)` — the name folded into the hash so the
+  ports for one agent don't collide with each other — then its own lease (the same
+  TOCTOU-safe allocation as the single-port case).
+- Each is exported as `IT2AGENT_PORT_<UPPER>` (e.g. `IT2AGENT_PORT_DB`). The
+  **first** name is *also* exported as the bare `IT2AGENT_PORT`, so every existing
+  consumer keeps working.
+- **Without `--ports` the behavior is byte-identical to before**: exactly one port,
+  keyed on `sha1("<repo>|<id>")`, exported as `IT2AGENT_PORT`, with no
+  `IT2AGENT_PORT_*` variables.
+- `it2agent-spawn` / `it2agent-tmux` forward the flag; `ls` / `status --json` list
+  all of an agent's ports (see below).
+
+### Canonical port (`agent.canonical_port`, OFF by default)
+
+Every agent always reaches its dynamic port(s). The **canonical port** feature
+additionally lets the *focused* agent answer on the project's **normal** dev port
+(e.g. `localhost:3000`), so the address of record points at whichever agent holds
+it. It is a per-`(repo, port-name)` **singleton lease**: exactly one agent at a
+time holds each name's canonical number.
+
+```sh
+it2agent-flag enable agent.canonical_port
+
+# create with the flag ON additionally tries to take the canonical port(s):
+it2agent-worktree create --repo . --id 13 --role worker --ports web
+#   canonical_port_web=3000        # -> IT2AGENT_CANONICAL_PORT_WEB=3000
+
+# a second agent does NOT get canonical web while the first holds it (singleton).
+# hand it back explicitly:
+it2agent-worktree canonical --repo . --id 13 --role worker --ports web --release
+# or take it over from a live holder:
+it2agent-worktree canonical --repo . --id 42 --role worker --ports web --canonical-takeover
+```
+
+- The canonical number is `--canonical-port <base>` + index-of-name (default base
+  `3000`: first name → 3000, second → 3001, …). Stored as
+  `.leases/canonical-<name>.lease`; reclaimed by the same stale rule (worktree gone
+  or dead owner pid).
+- The holder additionally exports `IT2AGENT_CANONICAL_PORT_<NAME>`; non-holders
+  keep only their dynamic ports.
+- **We hand over the *number*; we do not proxy.** The agent command binds the
+  canonical port itself. Real port-forwarding to the focused instance is future
+  daemon work (#3).
+- **Self-gated on `agent.canonical_port`** (fail-safe OFF). When OFF, no canonical
+  lease is touched and no `IT2AGENT_CANONICAL_PORT_*` is exported. `--no-gate` /
+  `IT2AGENT_FORCE=1` bypass the gate for local testing (and so do
+  `--force-isolation` spawns, which forward `--no-gate` to the helper).
+- `cleanup` releases any canonical lease the removed worktree held, so another
+  agent can take it.
+
 ## `create` / `cleanup` (the side-effect layer)
 
 ```sh
@@ -194,11 +260,15 @@ with proper escaping — no `python` dependency), with stable keys for the janit
 
 ```json
 [{"branch":"it2agent/worker-13-d8763d","worktree":"/…/worker-13-d8763d",
-  "port":41724,"changes":2,"clean":false,"stale":false,"stale_reason":null}]
+  "port":41724,"ports":[41724,41903],"canonical":[3000],
+  "changes":2,"clean":false,"stale":false,"stale_reason":null}]
 ```
 
-`port` is `null` when a worktree holds no lease; `changes`/`clean` are `null`
-when the worktree dir is gone.
+`port` is the first dynamic port (`null` when a worktree holds no lease, kept for
+back-compat); `ports` is the array of **all** the agent's dynamic ports and
+`canonical` the array of canonical numbers it holds (both `[]` when none).
+`changes`/`clean` are `null` when the worktree dir is gone. The table adds a
+`PORTS` column (comma-joined) and a `CANON` column.
 
 **Stale, but only reported.** An entry is flagged STALE when its worktree
 directory no longer exists (`worktree-gone`) or its lease records a positive
