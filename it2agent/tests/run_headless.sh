@@ -93,7 +93,22 @@ done < <(find it2agent -path '*/tests/test_*.py' | grep -v '_live\.py$' | sort)
 
 # --- Shell suites -------------------------------------------------------------
 # Excludes *_live.sh (LIVE layer, e.g. test_spawn_delivery_live.sh).
+#
+# IT2AGENT_SKIP_OSACOMPILE escape hatch: a couple of suites (spawn/tmux) include
+# an AppleScript SYNTAX check that osacompiles `tell application "iTerm2"`.
+# osacompile resolves that terminology via LaunchServices, so it only works on a
+# host that has iTerm2 installed. On a hosted CI runner without iTerm2 that
+# check cannot pass, so the workflow sets IT2AGENT_SKIP_OSACOMPILE=1 and this
+# runner skips the suites that carry it (detected by an `osacompile` reference)
+# rather than red the job on an environment limitation. Those suites still run
+# in full on a dev Mac or self-hosted runner (flag unset) — same tier as the
+# live surfaces. This is a coarse suite-level skip, not a way to fake the check.
+skip_osacompile="${IT2AGENT_SKIP_OSACOMPILE:-}"
 while IFS= read -r t; do
+	if [ -n "$skip_osacompile" ] && grep -q 'osacompile' "$t"; then
+		printf '\n\033[33mSKIP\033[0m sh  %s (osacompile iTerm2-terminology check; run on a Mac with iTerm2)\n' "$t"
+		continue
+	fi
 	run_suite "sh  $t" bash "$t"
 done < <(find it2agent -path '*/tests/test_*.sh' | grep -v '_live\.sh$' | sort)
 
