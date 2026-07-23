@@ -50,10 +50,20 @@ jobs:
         # This is NOT the live layer (that needs iTerm2 *running* + the API);
         # it only lets the headless syntax check compile, matching a dev Mac.
         run: |
-          brew install --cask iterm2
-          # Force LaunchServices registration so `tell application "iTerm2"`
-          # resolves at compile time without launching the app.
+          # --no-quarantine: a Gatekeeper-quarantined bundle is refused by
+          # LaunchServices name resolution, which is what osacompile uses to
+          # turn `tell application "iTerm2"` into the app's scripting dictionary.
+          brew install --cask --no-quarantine iterm2
+          # Belt and suspenders: strip any quarantine xattr, then force
+          # LaunchServices to register the bundle (no launch, no window server).
+          sudo xattr -dr com.apple.quarantine /Applications/iTerm.app || true
           /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f /Applications/iTerm.app || true
+          # Diagnostic: prove terminology resolves before the suites rely on it.
+          if osacompile -o /dev/null -e 'tell application "iTerm2" to return name' >/dev/null 2>&1; then
+            echo "osacompile resolves iTerm2 terminology"
+          else
+            echo "::warning::osacompile cannot resolve iTerm2 terminology; spawn/tmux AppleScript-syntax checks will fail"
+          fi
 
       - name: Show environment
         run: |
