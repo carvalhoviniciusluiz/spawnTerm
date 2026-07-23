@@ -35,6 +35,13 @@ Major New Features:
   source of truth. If it2agent-flag cannot be
   found the checkboxes are shown disabled.
 
+- The AI Agents tab now shows a one-line
+  description under each capability, so you
+  can tell what a toggle does without hunting
+  for docs. The capabilities are laid out in a
+  single scrolling column and each row has a
+  tooltip with the fuller explanation.
+
 - The “Team Bridge” agent capability now
   installs a Claude Code hook when you check
   it. It targets the active terminal's git

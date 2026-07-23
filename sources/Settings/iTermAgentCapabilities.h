@@ -29,6 +29,12 @@ NS_ASSUME_NONNULL_BEGIN
 // Human-readable label for a capability, e.g. "Worktree Isolation".
 + (NSString *)displayNameForCapability:(NSString *)capability;
 
+// One-line, user-facing description of what a capability does, e.g.
+// "Gives each agent its own git worktree and a dedicated port." Mirrors the
+// KNOWN_FLAGS descriptions in it2agent-flag / it2agent_flag.py; shown next to
+// each checkbox in the AI Agents settings pane.
++ (NSString *)descriptionForCapability:(NSString *)capability;
+
 // YES if it2agent-flag was located and is runnable. When NO, the checkboxes
 // should be disabled and all reads report OFF.
 @property (class, nonatomic, readonly) BOOL available;

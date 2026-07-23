@@ -23,6 +23,7 @@
 #import "iTermApplicationDelegate.h"
 #import "iTermBuriedSessions.h"
 #import "iTermController.h"
+#import "iTermFlippedView.h"
 #import "iTermHotKeyController.h"
 #import "iTermNotificationCenter.h"
 #import "iTermPreferenceDidChangeNotification.h"
@@ -1833,16 +1834,17 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
 
 #pragma mark - it2agent capabilities
 
-// The it2agent capability list is dynamic (currently 11 flags) and its single
-// source of truth is ~/.config/it2agent/config.toml, read/written by the
-// it2agent-flag CLI — not NSUserDefaults. We create the checkboxes in code
-// rather than editing the monolithic PreferencePanel.xib by hand: the XIB
-// contributes only an empty fixed-frame container pane (_agentCapabilitiesView),
-// and the buttons are laid out here with springs-and-struts (no auto layout),
-// matching the surrounding fixed-frame AI controls. Each checkbox is bound with
-// a synthetic getter/setter that delegates to it2agent-flag, mirroring the
-// _enableAI pattern, so config.toml stays authoritative and no flag logic is
-// reimplemented in ObjC.
+// The it2agent capability list is dynamic (16 flags) and its single source of
+// truth is ~/.config/it2agent/config.toml, read/written by the it2agent-flag
+// CLI — not NSUserDefaults. We create the checkboxes in code rather than editing
+// the monolithic PreferencePanel.xib by hand: the XIB contributes only an empty
+// fixed-frame container pane (_agentCapabilitiesView), and each capability is
+// laid out here as a name-checkbox + wrapped one-line description row in a
+// single scrolling column (an NSScrollView, still springs-and-struts, no auto
+// layout, matching the surrounding fixed-frame AI controls). Each checkbox is
+// bound with a synthetic getter/setter that delegates to it2agent-flag,
+// mirroring the _enableAI pattern, so config.toml stays authoritative and no
+// flag logic is reimplemented in ObjC.
 // Per-capability tooltip text, keyed by capability identifier. Only Team Bridge
 // needs one for now because its checkbox has a side effect beyond flipping the
 // flag: it also installs/removes a Claude Code hook in ~/.claude/settings.json.
@@ -1864,47 +1866,71 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     [iTermAgentCapabilities invalidateCache];
 
     const BOOL available = [iTermAgentCapabilities available];
+    const CGFloat containerWidth = NSWidth(container.bounds);
     const CGFloat containerHeight = NSHeight(container.bounds);
     const CGFloat leftMargin = 20;
-    const CGFloat columnWidth = 290;
-    const CGFloat rowHeight = 26;
-    const CGFloat checkboxHeight = 18;
     const CGFloat headerHeight = 17;
-    // Keep exactly two columns and derive the row count from the number of
-    // capabilities so the grid always fits the fixed 651x291 container. A
-    // hardcoded rowsPerColumn (was 6, for the original 11 flags) overflowed into
-    // a third off-panel column once imports #58/#59/#60 added 3 more flags.
-    NSArray<NSString *> *capabilities = [iTermAgentCapabilities capabilityIdentifiers];
-    const NSInteger columnCount = 2;
-    const NSInteger rowsPerColumn = MAX((NSInteger)1,
-                                        ((NSInteger)capabilities.count + columnCount - 1) / columnCount);
 
+    // A fixed header + one-line note pinned to the top of the pane, above the
+    // scrolling list. These stay put; only the capability rows scroll.
     NSTextField *header = [NSTextField labelWithString:@"Agent Capabilities"];
-    header.frame = NSMakeRect(leftMargin,
-                              containerHeight - headerHeight - 8,
-                              columnWidth * 2,
-                              headerHeight);
-    header.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    const CGFloat headerY = containerHeight - headerHeight - 8;
+    header.frame = NSMakeRect(leftMargin, headerY, containerWidth - leftMargin * 2, headerHeight);
+    header.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [container addSubview:header];
 
     NSTextField *note = [NSTextField labelWithString:available ? @"Toggle per-user feature flags stored in ~/.config/it2agent/config.toml." : @"it2agent-flag was not found. Install it or set $IT2AGENT_FLAG to enable these toggles."];
     note.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     note.textColor = [NSColor secondaryLabelColor];
-    note.frame = NSMakeRect(leftMargin,
-                            containerHeight - headerHeight - 8 - rowHeight,
-                            columnWidth * 2,
-                            headerHeight);
-    note.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    const CGFloat noteY = headerY - 22;
+    note.frame = NSMakeRect(leftMargin, noteY, containerWidth - leftMargin * 2, headerHeight);
+    note.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [container addSubview:note];
 
-    const CGFloat firstRowTop = containerHeight - headerHeight - 8 - rowHeight * 2;
+    // There are 16 capabilities and each row now carries a wrapped description,
+    // so the list no longer fits the fixed 651x291 pane. Put the rows in a
+    // single scrolling column inside an NSScrollView (still no auto layout: the
+    // scroll view resizes with springs-and-struts and the document view is laid
+    // out with computed fixed frames). A flipped document view lets us lay rows
+    // out top-to-bottom and starts the scroll position at the top.
+    const CGFloat scrollBottom = 8;
+    const CGFloat scrollTop = noteY - 8;
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(leftMargin,
+                                                                              scrollBottom,
+                                                                              containerWidth - leftMargin * 2,
+                                                                              scrollTop - scrollBottom)];
+    scrollView.hasVerticalScroller = YES;
+    scrollView.hasHorizontalScroller = NO;
+    scrollView.autohidesScrollers = YES;
+    scrollView.drawsBackground = NO;
+    scrollView.borderType = NSNoBorder;
+    scrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [container addSubview:scrollView];
+
+    // Lay out inside the content width (accounts for the vertical scroller).
+    const CGFloat contentWidth = scrollView.contentSize.width;
+    const CGFloat rowLeft = 4;
+    const CGFloat descIndent = 20;   // align description under the checkbox title
+    const CGFloat rightPad = 6;
+    const CGFloat checkboxHeight = 18;
+    const CGFloat descTopGap = 1;
+    const CGFloat descHeight = 32;   // room for up to two wrapped lines
+    const CGFloat targetLabelHeight = headerHeight;
+    const CGFloat rowGap = 12;
+    const CGFloat topPad = 6;
+    const CGFloat descWidth = contentWidth - rowLeft - descIndent - rightPad;
+
+    iTermFlippedView *documentView = [[iTermFlippedView alloc] initWithFrame:NSMakeRect(0, 0, contentWidth, 0)];
+    documentView.autoresizingMask = NSViewWidthSizable;
+
+    NSArray<NSString *> *capabilities = [iTermAgentCapabilities capabilityIdentifiers];
     NSMutableArray<PreferenceInfo *> *infos = [NSMutableArray array];
+    __block CGFloat y = topPad;
     [capabilities enumerateObjectsUsingBlock:^(NSString *capability, NSUInteger idx, BOOL *stop) {
-        const NSInteger column = (NSInteger)idx / rowsPerColumn;
-        const NSInteger row = (NSInteger)idx % rowsPerColumn;
-        const CGFloat x = leftMargin + column * columnWidth;
-        const CGFloat y = firstRowTop - row * rowHeight;
-        NSButton *checkbox = [[NSButton alloc] initWithFrame:NSMakeRect(x, y, columnWidth - 10, checkboxHeight)];
+        const BOOL isTeamBridge = [capability isEqualToString:@"team_bridge"];
+        NSString *tooltip = [self toolTipForAgentCapability:capability] ?: [iTermAgentCapabilities descriptionForCapability:capability];
+
+        NSButton *checkbox = [[NSButton alloc] initWithFrame:NSMakeRect(rowLeft, y, contentWidth - rowLeft - rightPad, checkboxHeight)];
         [checkbox setButtonType:NSButtonTypeSwitch];
         // defineControl: does not wire target/action (XIB controls get it from IB);
         // programmatically-created controls must connect it themselves, else a
@@ -1912,16 +1938,26 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         checkbox.target = self;
         checkbox.action = @selector(settingChanged:);
         checkbox.title = [iTermAgentCapabilities displayNameForCapability:capability];
-        checkbox.toolTip = [self toolTipForAgentCapability:capability];
-        checkbox.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
-        [container addSubview:checkbox];
+        checkbox.toolTip = tooltip;
+        checkbox.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+        [documentView addSubview:checkbox];
+        y += checkboxHeight + descTopGap;
+
+        NSTextField *descLabel = [NSTextField wrappingLabelWithString:[iTermAgentCapabilities descriptionForCapability:capability]];
+        descLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+        descLabel.textColor = [NSColor secondaryLabelColor];
+        descLabel.selectable = NO;
+        descLabel.toolTip = tooltip;
+        descLabel.frame = NSMakeRect(rowLeft + descIndent, y, descWidth, descHeight);
+        descLabel.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+        [documentView addSubview:descLabel];
+        y += descHeight;
 
         NSString *key = [iTermAgentCapabilities preferenceKeyForCapability:capability];
         PreferenceInfo *info = [self defineControl:checkbox
                                                key:key
                                        relatedView:nil
                                               type:kPreferenceInfoTypeCheckbox];
-        const BOOL isTeamBridge = [capability isEqualToString:@"team_bridge"];
         if (isTeamBridge) {
             // Team Bridge does NOT flip the global config.toml flag. Its state is
             // whether our hook is present in the ACTIVE project's local settings,
@@ -1936,6 +1972,18 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
             info.shouldBeEnabled = ^BOOL{
                 return [iTermAgentCapabilities available] && [weakSelf teamBridgeActiveProjectIsGitRepo];
             };
+
+            // Team Bridge's extra label showing the resolved target file (or
+            // guidance when there is no active git project) lives directly under
+            // its description, inside the scrolling list.
+            _teamBridgeTargetLabel = [NSTextField labelWithString:@""];
+            _teamBridgeTargetLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+            _teamBridgeTargetLabel.textColor = [NSColor secondaryLabelColor];
+            ((NSCell *)_teamBridgeTargetLabel.cell).lineBreakMode = NSLineBreakByTruncatingMiddle;
+            _teamBridgeTargetLabel.frame = NSMakeRect(rowLeft + descIndent, y, descWidth, targetLabelHeight);
+            _teamBridgeTargetLabel.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+            [documentView addSubview:_teamBridgeTargetLabel];
+            y += targetLabelHeight;
         } else {
             info.syntheticGetter = ^id{
                 return @([iTermAgentCapabilities isEnabledForCapability:capability]);
@@ -1948,18 +1996,15 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
             };
         }
         [infos addObject:info];
+        y += rowGap;
     }];
 
-    // A full-width label under the grid, associated with the Team Bridge
-    // checkbox, showing the resolved target file (or guidance when there is no
-    // active git project to target). Fixed-frame like the rest of this pane.
-    _teamBridgeTargetLabel = [NSTextField labelWithString:@""];
-    _teamBridgeTargetLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
-    _teamBridgeTargetLabel.textColor = [NSColor secondaryLabelColor];
-    ((NSCell *)_teamBridgeTargetLabel.cell).lineBreakMode = NSLineBreakByTruncatingMiddle;
-    _teamBridgeTargetLabel.frame = NSMakeRect(leftMargin, 6, columnWidth * 2, headerHeight);
-    _teamBridgeTargetLabel.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
-    [container addSubview:_teamBridgeTargetLabel];
+    // Size the document view to its content. If the content is shorter than the
+    // visible area, stretch it to fill so it anchors at the top.
+    const CGFloat contentHeight = MAX(y, scrollView.contentSize.height);
+    documentView.frame = NSMakeRect(0, 0, contentWidth, contentHeight);
+    scrollView.documentView = documentView;
+    [documentView scrollPoint:NSMakePoint(0, 0)];
 
     _agentCapabilityInfos = [infos copy];
     [self updateTeamBridgeTargetLabel];
