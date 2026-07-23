@@ -31,6 +31,7 @@ import logging
 
 from bridge import Bridge, connect_broker
 from envelope import parse_envelope
+from inbound import NATIVE_STATUS_VAR_CANDIDATES, reflect_native_sessions
 from registry import AGENT_VAR_KEYS, Registry
 
 # How often the delivery loop polls the durable mailbox for live recipients.
@@ -119,6 +120,11 @@ class DaemonAdapter:
         await self._seed_from_app(app)
         self.log.info("seeded registry with %d live session(s)", len(self.registry))
 
+        # Inbound (#115): one-way read of what native iTerm2 knows (name /
+        # user.agent_* vars / cc-status tab-status text) reflected into our
+        # registry. Read-only on the native side; a bad read never aborts run.
+        await self.reflect_native_state(app)
+
         coros = [
             self._watch_new_sessions(),
             self._watch_terminated_sessions(),
@@ -183,6 +189,71 @@ class DaemonAdapter:
         except Exception as exc:  # noqa: BLE001 - never let a bad read crash us
             self.log.debug("variable read failed (%s): %s", name, exc)
             return None
+
+    # -- inbound native-state read (#115) --------------------------------
+    # One-way, read-only cooperation: reflect what native iTerm2 knows about
+    # each live session into our registry (name / dot-free user.agent_* vars /
+    # native cc-status tab-status text). The MAPPING is pure (see inbound.py);
+    # this method only does the iTerm2 reads and hands snapshot dicts over.
+
+    async def reflect_native_state(self, app=None) -> int:
+        """Read live native sessions and reflect them into the registry (#115).
+
+        Gated: with no connection this is a clean no-op (returns 0), mirroring
+        the module-purity / API-off skip conventions. Never raises — a per-read
+        failure degrades to an empty field (via ``_safe_var``) and a bad app
+        walk is logged, not propagated, so the inbound read never aborts the
+        daemon. Reflects into the durable broker registry too (gated on the
+        broker flag inside ``note_session``). Returns the reflected count.
+        """
+        if self.connection is None:
+            return 0
+        try:
+            if app is None:
+                import iterm2  # lazy: keep the top-level import iterm2-free.
+
+                app = await iterm2.async_get_app(self.connection)
+            records = []
+            for window in app.terminal_windows:
+                for tab in window.tabs:
+                    for session in tab.sessions:
+                        records.append(await self._native_snapshot(session))
+        except Exception as exc:  # noqa: BLE001 - inbound read must never crash us
+            self.log.debug("inbound: native read failed: %s", exc)
+            return 0
+        reflected = reflect_native_sessions(self.registry, records)
+        for record in reflected:
+            if self.bridge is not None:
+                self.bridge.note_session(record)
+        self.log.info(
+            "inbound: reflected %d native session(s) into registry", len(reflected)
+        )
+        return len(reflected)
+
+    async def _native_snapshot(self, session) -> dict:
+        """Build the native session-record dict the pure mapping consumes.
+
+        Reads the session name, cwd, the dot-free ``user.agent_*`` vars, and the
+        first non-empty native cc-status candidate variable. Every read goes
+        through ``_safe_var`` so a bad read degrades to an omitted field.
+        """
+        record: dict = {"session_id": session.session_id}
+        title = await self._safe_var(session, "name")
+        if title:
+            record["name"] = title
+        cwd = await self._safe_var(session, "path")
+        if cwd:
+            record["cwd"] = cwd
+        for key in AGENT_VAR_KEYS:
+            value = await self._safe_var(session, f"user.{key}")
+            if value:
+                record[key] = value
+        for candidate in NATIVE_STATUS_VAR_CANDIDATES:
+            value = await self._safe_var(session, candidate)
+            if value:
+                record["cc_status"] = value
+                break
+        return record
 
     # -- lifecycle monitors ----------------------------------------------
 
