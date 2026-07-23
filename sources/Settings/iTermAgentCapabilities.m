@@ -15,6 +15,13 @@ static NSString *const iTermAgentFlagPathUserDefaultsKey = @"NoSyncIT2AgentFlagP
 // Environment variable that, when set, overrides all other resolution.
 static NSString *const iTermAgentFlagEnvironmentVariable = @"IT2AGENT_FLAG";
 
+// The Team Bridge capability installs/removes the Claude Code agent-teams hook
+// in the active project's gitignored .claude/settings.local.json, via
+// it2agent-team-hook (a best-effort, project-scoped GUI action — see #96/#93).
+static NSString *const iTermAgentTeamHookToolName = @"it2agent-team-hook";
+static NSString *const iTermAgentTeamHookPathUserDefaultsKey = @"NoSyncIT2AgentTeamHookPath";
+static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_HOOK";
+
 @implementation iTermAgentCapabilities
 
 + (NSArray<NSString *> *)capabilityIdentifiers {
@@ -133,6 +140,15 @@ static NSString *const iTermAgentFlagEnvironmentVariable = @"IT2AGENT_FLAG";
                        userDefaultsKey:iTermAgentFlagPathUserDefaultsKey];
 }
 
+// Convenience accessor for it2agent-team-hook (Team Bridge install/uninstall).
+// Uses the identical resolver used for it2agent-flag so env → NoSync default →
+// login-shell `command -v` → common install locations all apply.
++ (nullable NSString *)teamHookExecutablePath {
+    return [self executablePathForTool:iTermAgentTeamHookToolName
+                                envVar:iTermAgentTeamHookEnvironmentVariable
+                       userDefaultsKey:iTermAgentTeamHookPathUserDefaultsKey];
+}
+
 + (nullable NSString *)resolveExecutablePathForTool:(NSString *)tool
                                              envVar:(NSString *)envVar
                                     userDefaultsKey:(NSString *)userDefaultsKey {
@@ -207,12 +223,25 @@ static NSString *const iTermAgentFlagEnvironmentVariable = @"IT2AGENT_FLAG";
 + (nullable NSString *)runExecutable:(NSString *)path
                            arguments:(NSArray<NSString *> *)arguments
                           exitStatus:(nullable int *)exitStatus {
+    return [self runExecutable:path arguments:arguments directory:nil exitStatus:exitStatus];
+}
+
+// As above, but runs with `directory` as the process working directory (nil to
+// inherit the app's). Used by the project-scoped team-bridge commands, which
+// resolve the git root from cwd.
++ (nullable NSString *)runExecutable:(NSString *)path
+                           arguments:(NSArray<NSString *> *)arguments
+                           directory:(nullable NSString *)directory
+                          exitStatus:(nullable int *)exitStatus {
     if (exitStatus) {
         *exitStatus = -1;
     }
     NSTask *task = [[NSTask alloc] init];
     task.launchPath = path;
     task.arguments = arguments;
+    if (directory.length > 0) {
+        task.currentDirectoryPath = directory;
+    }
     NSPipe *stdoutPipe = [NSPipe pipe];
     task.standardOutput = stdoutPipe;
     task.standardError = [NSPipe pipe];
@@ -320,6 +349,69 @@ static BOOL sCacheLoaded = NO;
     DLog(@"it2agent-flag %@ %@ exited %d", subcommand, capability, status);
     // Re-query on next read so the cache reflects what the CLI actually wrote.
     [self invalidateCache];
+}
+
+#pragma mark - Team Bridge (project-scoped Claude Code hook)
+
++ (BOOL)teamBridgeStatusForDirectory:(NSString *)directory
+                        resolvedPath:(NSString * _Nullable * _Nullable)resolvedPath
+                           installed:(BOOL *)installed {
+    if (resolvedPath) {
+        *resolvedPath = nil;
+    }
+    if (installed) {
+        *installed = NO;
+    }
+    if (directory.length == 0) {
+        return NO;
+    }
+    NSString *hookPath = [self teamHookExecutablePath];
+    if (!hookPath) {
+        DLog(@"team-bridge status unavailable: it2agent-team-hook not found");
+        return NO;
+    }
+    int status = -1;
+    // `status --scope project` prints the resolved settings.local.json path on
+    // stdout and signals state via exit code: 0 = our hook installed, 1 = absent,
+    // 2 = the directory is not inside a git repo (or unresolvable). Run it with
+    // the session's working directory as cwd so the CLI finds that project root.
+    NSString *output = [self runExecutable:hookPath
+                                 arguments:@[ @"status", @"--scope", @"project" ]
+                                 directory:directory
+                                exitStatus:&status];
+    if (status != 0 && status != 1) {
+        // Not a git repo (2), or the process failed to launch (-1).
+        return NO;
+    }
+    if (resolvedPath) {
+        NSString *trimmed = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        *resolvedPath = trimmed.length > 0 ? trimmed : nil;
+    }
+    if (installed) {
+        *installed = (status == 0);
+    }
+    return YES;
+}
+
++ (void)setTeamBridgeInstalled:(BOOL)installed forDirectory:(NSString *)directory {
+    if (directory.length == 0) {
+        DLog(@"Ignoring team-bridge %@: no working directory", installed ? @"install" : @"uninstall");
+        return;
+    }
+    NSString *hookPath = [self teamHookExecutablePath];
+    if (!hookPath) {
+        DLog(@"Skipping team-bridge %@: it2agent-team-hook unavailable", installed ? @"install" : @"uninstall");
+        return;
+    }
+    NSString *subcommand = installed ? @"install" : @"uninstall";
+    int status = -1;
+    // Best-effort: runExecutable: is exception-safe and returns nil on launch
+    // failure, so a missing tool or a write error never throws into the pane.
+    [self runExecutable:hookPath
+              arguments:@[ subcommand, @"--scope", @"project" ]
+              directory:directory
+             exitStatus:&status];
+    DLog(@"it2agent-team-hook %@ --scope project (cwd=%@) exited %d", subcommand, directory, status);
 }
 
 @end

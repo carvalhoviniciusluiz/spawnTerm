@@ -13,9 +13,11 @@ task list; we *shadow* them durably. This is COOPERATION PATH 1 in
 Wiring: registered as three Claude Code hooks (``TaskCreated`` / ``TaskCompleted``
 / ``TeammateIdle``) that each deliver JSON on **stdin**. The hook is a thin CLI:
 
-    it2agent-team-hook <event>          # reads stdin JSON, mirrors to the broker
-    it2agent-team-hook install          # append the 3 hooks to ~/.claude/settings.json
-    it2agent-team-hook uninstall        # remove ONLY the entries we added
+    it2agent-team-hook <event>                    # reads stdin JSON, mirrors to broker
+    it2agent-team-hook install --scope project    # append 3 hooks to the project's
+                                                  #   gitignored settings.local.json
+    it2agent-team-hook uninstall --scope project  # remove ONLY the entries we added
+    it2agent-team-hook status --scope project     # report install state via exit code
 
 CRITICAL observer contract (Claude Code hooks): **exit code 2 BLOCKS the team**
 (rolls back task creation / prevents completion / keeps a teammate working). Our
@@ -23,8 +25,12 @@ mirror is a passive observer, so the event path **ALWAYS ``exit 0`` and NEVER
 writes to stdout**, under every condition: flag OFF, broker down, malformed or
 empty stdin, unknown event, any exception. Diagnostics go to stderr only.
 
-Self-gates on the ``agent.team_bridge`` feature flag (default OFF ⇒ no-op).
-Bypass locally with ``--no-gate`` or ``IT2AGENT_FORCE=1``.
+Gating (per-project model, #96): installing the hook into a project IS the
+opt-in, so once installed the event path RUNS by default. The global
+``agent.team_bridge`` flag is only an OPTIONAL kill-switch — an EXPLICIT
+``false`` in config.toml forces the bridge OFF; unset/absent/true all RUN.
+Bypass the gate entirely for local testing with ``--no-gate`` or
+``IT2AGENT_FORCE=1``.
 
 Team key derivation: ``team_name`` is DEPRECATED in the hook payload, so the team
 key is derived deterministically from ``session_id``:
@@ -297,19 +303,70 @@ def run_event(event: str, raw_stdin: str, no_gate: bool = False) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# install / uninstall — operator opt-in, edits ~/.claude/settings.json.
+# install / uninstall / status — operator opt-in, edits a Claude Code settings
+# file. Two scopes:
+#   user     -> ~/.claude/settings.json (global, distributed with the user)
+#   project  -> <git-root-of-cwd>/.claude/settings.local.json — machine-local,
+#              gitignored, per-project but NOT committed/distributed. This is the
+#              scope the GUI uses: a project-committed settings.json would run
+#              hooks UNGATED for anyone who checks it out (CVE-2025-59536), so we
+#              deliberately target the gitignored .local file instead.
 # --------------------------------------------------------------------------- #
 
+_GITIGNORE_ENTRY = ".claude/settings.local.json"
 
-def settings_path() -> Path:
-    """Resolve the Claude Code settings file.
 
-    Overridable via ``IT2AGENT_CLAUDE_SETTINGS`` so tests (and the operator)
-    never touch the real ``~/.claude/settings.json`` unless they mean to.
+class NotAGitRepoError(Exception):
+    """Raised when ``--scope project`` is requested from outside a git repo."""
+
+
+def _err(message: str) -> None:
+    """Operator-command error → stderr (never stdout). Never raises."""
+    try:
+        print(f"{PROG}: {message}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - logging must never raise
+        pass
+
+
+def _find_git_root(start: Path) -> Optional[Path]:
+    """Walk up from ``start`` for a ``.git`` entry (dir or file); repo root or None.
+
+    A ``.git`` file (submodules / linked worktrees) counts as well as a dir, so
+    this works from inside a worktree. Never raises.
+    """
+    try:
+        current = start.resolve()
+    except OSError:
+        return None
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def settings_path(scope: str = "user", start_dir: Optional[Path] = None) -> Path:
+    """Resolve the Claude Code settings file for ``scope``.
+
+    ``IT2AGENT_CLAUDE_SETTINGS`` (a full path) always wins so tests and the
+    operator can redirect writes away from any real file. Otherwise:
+
+      * ``user``    → ``~/.claude/settings.json``
+      * ``project`` → ``<git-root-of(start_dir or cwd)>/.claude/settings.local.json``
+
+    Project scope raises :class:`NotAGitRepoError` when ``start_dir`` (default:
+    the current working directory) is not inside a git repository — we never
+    silently fall back to the global file.
     """
     override = os.environ.get("IT2AGENT_CLAUDE_SETTINGS")
     if override:
         return Path(override).expanduser()
+    if scope == "project":
+        root = _find_git_root(start_dir or Path.cwd())
+        if root is None:
+            raise NotAGitRepoError(
+                "not inside a git repository; --scope project needs a project root"
+            )
+        return root / ".claude" / "settings.local.json"
     return Path.home() / ".claude" / "settings.json"
 
 
@@ -411,31 +468,127 @@ def _uninstall_from(settings: dict) -> dict:
     return settings
 
 
+def _is_installed(settings: dict) -> bool:
+    """True iff any of our hook entries is present in ``settings`` (match basename)."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            inner = group.get("hooks")
+            if not isinstance(inner, list):
+                continue
+            for entry in inner:
+                if isinstance(entry, dict) and _is_ours(entry.get("command")):
+                    return True
+    return False
+
+
 def _write_settings(path: Path, settings: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(settings, indent=2) + "\n"
     path.write_text(text, encoding="utf-8")
 
 
-def cmd_install() -> int:
-    path = settings_path()
+def _gitignore_covers(lines: list[str], entry: str) -> bool:
+    """True iff a ``.gitignore`` line already ignores ``entry``.
+
+    Heuristic (no git invocation, so this stays hermetic and unit-testable):
+    an uncommented line equals the exact path or a broader pattern that clearly
+    covers it (the ``.claude`` dir, or the bare filename anywhere).
+    """
+    patterns = {
+        entry,
+        "/" + entry,
+        ".claude/",
+        "/.claude/",
+        ".claude",
+        "/.claude",
+        "settings.local.json",
+        "**/settings.local.json",
+    }
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in patterns:
+            return True
+    return False
+
+
+def _ensure_gitignored(root: Path) -> bool:
+    """Ensure ``<root>/.gitignore`` ignores ``.claude/settings.local.json``.
+
+    Creates ``.gitignore`` if missing; appends our entry (with a comment) only
+    when nothing already covers it. Returns True iff it wrote an addition.
+    Idempotent and best-effort (a write failure returns False, never raises).
+    """
+    gitignore = root / ".gitignore"
+    text = ""
+    if gitignore.is_file():
+        try:
+            text = gitignore.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    if _gitignore_covers(text.splitlines(), _GITIGNORE_ENTRY):
+        return False
+    prefix = text
+    if prefix and not prefix.endswith("\n"):
+        prefix += "\n"
+    addition = ""
+    if prefix.strip():
+        addition += "\n"  # visual separation from existing content
+    addition += "# it2agent: machine-local Claude Code settings (do not commit)\n"
+    addition += _GITIGNORE_ENTRY + "\n"
+    try:
+        gitignore.parent.mkdir(parents=True, exist_ok=True)
+        gitignore.write_text(prefix + addition, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def cmd_install(scope: str = "user", start_dir: Optional[Path] = None) -> int:
+    try:
+        path = settings_path(scope, start_dir)
+    except NotAGitRepoError as exc:
+        _err(str(exc))
+        return 2
     command_base = _wrapper_command_path()
     settings = _load_settings(path)
     _install_into(settings, command_base)
     _write_settings(path, settings)
     print(f"Installed it2agent team-bridge hooks into {path}")
     print("Registered: TaskCreated, TaskCompleted, TeammateIdle")
+    # Project scope writes a machine-local file that must never be committed.
+    # (Skip when the IT2AGENT_CLAUDE_SETTINGS escape hatch redirected the path —
+    # there is no project root to reason about then.)
+    if scope == "project" and not os.environ.get("IT2AGENT_CLAUDE_SETTINGS"):
+        root = path.parent.parent  # <root>/.claude/settings.local.json -> <root>
+        if _ensure_gitignored(root):
+            print(f"Added {_GITIGNORE_ENTRY} to {root / '.gitignore'}")
     print(
         "NOTE: agent teams are experimental — you must enable them yourself by "
         "exporting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1. This tool does NOT set it."
     )
-    print("NOTE: the bridge also self-gates on the it2agent flag; enable it with:")
-    print("      it2agent-flag enable agent.team_bridge")
+    print(
+        "NOTE: the hook now runs on the next Claude Code session in this project. "
+        "The agent.team_bridge flag is an optional kill-switch: disable it with "
+        "`it2agent-flag disable agent.team_bridge` to force the bridge OFF."
+    )
     return 0
 
 
-def cmd_uninstall() -> int:
-    path = settings_path()
+def cmd_uninstall(scope: str = "user", start_dir: Optional[Path] = None) -> int:
+    try:
+        path = settings_path(scope, start_dir)
+    except NotAGitRepoError as exc:
+        _err(str(exc))
+        return 2
     settings = _load_settings(path)
     _uninstall_from(settings)
     _write_settings(path, settings)
@@ -443,24 +596,46 @@ def cmd_uninstall() -> int:
     return 0
 
 
+def cmd_status(scope: str = "user", start_dir: Optional[Path] = None) -> int:
+    """Report install state read-only: print the resolved path, signal via exit.
+
+    Exit 0 = our hooks are present; 1 = absent; 2 = ``--scope project`` from
+    outside a git repo (path unresolvable). Never writes to a file.
+    """
+    try:
+        path = settings_path(scope, start_dir)
+    except NotAGitRepoError as exc:
+        _err(str(exc))
+        return 2
+    print(str(path))
+    settings = _load_settings(path)
+    return 0 if _is_installed(settings) else 1
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
-USAGE = f"""usage: {PROG} <event|command> [--no-gate]
+USAGE = f"""usage: {PROG} <event|command> [--scope user|project] [--no-gate]
 
 Observer events (read hook JSON on stdin; ALWAYS exit 0, never write stdout):
   created | TaskCreated       mirror a new task as a 'pending' handoff
   completed | TaskCompleted   mirror task completion + notify the lead
   idle | TeammateIdle         register the idle teammate in the broker registry
 
-Operator commands (opt-in; edit ~/.claude/settings.json):
+Operator commands (opt-in; edit a Claude Code settings file):
   install                     append the three hooks (deep-merge; never overwrites)
   uninstall                   remove ONLY the entries this tool added
+  status                      print the resolved path; exit 0=installed, 1=absent
   -h, --help                  show this help
 
-Gating: the event path is a no-op unless the feature flag agent.team_bridge is
-ON. Bypass with --no-gate or IT2AGENT_FORCE=1 (local testing only).
+  --scope user (default)      ~/.claude/settings.json (global)
+  --scope project             <git-root>/.claude/settings.local.json (machine-local,
+                              gitignored; errors if cwd is not in a git repo)
+
+Gating: once installed, the event path RUNS by default; an EXPLICIT
+`agent.team_bridge = false` in config.toml is an optional kill-switch. Bypass
+the gate with --no-gate or IT2AGENT_FORCE=1 (local testing only).
 Settings file is overridable via IT2AGENT_CLAUDE_SETTINGS (used by tests)."""
 
 
@@ -468,15 +643,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
     no_gate = False
+    scope = "user"
     positional: list[str] = []
-    for arg in argv:
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
         if arg == "--no-gate":
             no_gate = True
         elif arg in ("-h", "--help"):
             print(USAGE)
             return 0
+        elif arg == "--scope":
+            index += 1
+            if index >= len(argv):
+                _err("--scope requires a value (user|project)")
+                return 2
+            scope = argv[index]
+        elif arg.startswith("--scope="):
+            scope = arg.split("=", 1)[1]
         else:
             positional.append(arg)
+        index += 1
 
     if not positional:
         # No event given. This should never happen in a real hook invocation;
@@ -486,10 +673,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     command = positional[0]
-    if command == "install":
-        return cmd_install()
-    if command == "uninstall":
-        return cmd_uninstall()
+    # Operator commands honor --scope and may exit non-zero (they are NOT the
+    # observer event path, so the always-exit-0 contract does not apply here).
+    if command in ("install", "uninstall", "status"):
+        if scope not in ("user", "project"):
+            _err(f"unknown scope: {scope!r} (expected user|project)")
+            return 2
+        if command == "install":
+            return cmd_install(scope)
+        if command == "uninstall":
+            return cmd_uninstall(scope)
+        return cmd_status(scope)
 
     # Otherwise it is an event: read stdin and mirror. ALWAYS exit 0.
     return run_event(command, _read_stdin(), no_gate=no_gate)

@@ -15,6 +15,13 @@ Exercised:
   * install/uninstall against a TEMP settings file: empty file, pre-existing
     unrelated hooks preserved (deep-merge), uninstall removes only ours,
     idempotent.
+  * per-project scope (#96): --scope project into a temp git repo creates the
+    gitignored settings.local.json, ensures the .gitignore entry (idempotent,
+    preserves existing), uninstall removes only ours, status reports state, and
+    a non-repo cwd errors non-zero;
+  * the #96 gate change: installed ⇒ runs by default; an EXPLICIT false flag is
+    the only kill-switch; unset/absent/true all run; --no-gate / IT2AGENT_FORCE
+    override; always exit 0.
 """
 
 import io
@@ -28,6 +35,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import it2agent_team_hook as hook  # noqa: E402
+import gate  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -309,18 +317,6 @@ class TestAlwaysExitZero(unittest.TestCase):
             env_patch.stop()
         return rc, buf.getvalue()
 
-    def test_flag_off_no_broker_call_exit0(self):
-        broker = FakeBroker()
-        with mock.patch.object(hook, "_send_to_broker") as send, mock.patch.dict(
-            os.environ, {}, clear=False
-        ):
-            os.environ.pop("IT2AGENT_FORCE", None)
-            # gate.gate_open reads the real flag (default OFF in test env).
-            rc, out = self._run("idle", json.dumps(IDLE_PAYLOAD), no_gate=False)
-            self.assertEqual(rc, 0)
-            self.assertEqual(out, "")
-            send.assert_not_called()
-
     def test_broker_connect_raises_exit0(self):
         # Force gate open; _send_to_broker uses the real BrokerClient path but
         # we stub it to raise, simulating a down broker.
@@ -481,6 +477,219 @@ class TestInstallUninstall(unittest.TestCase):
         hook.cmd_uninstall()
         second = self._read()
         self.assertEqual(first, second)
+
+
+# --------------------------------------------------------------------------- #
+# Per-project scope (#96): install/uninstall/status into a TEMP git repo.
+# --------------------------------------------------------------------------- #
+
+
+class TestScopeProject(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        # A fake git repo: a bare `.git` dir is enough for the root walk (no git
+        # binary needed). `sub/` exercises resolution from a nested cwd.
+        self.root = Path(self.tmp.name) / "proj"
+        (self.root / "sub").mkdir(parents=True)
+        (self.root / ".git").mkdir()
+        # The escape hatch must be UNSET so real git-root resolution runs.
+        self.env = mock.patch.dict(os.environ, {}, clear=False)
+        self.env.start()
+        os.environ.pop("IT2AGENT_CLAUDE_SETTINGS", None)
+        self._stdout = io.StringIO()
+        self._old = sys.stdout
+        sys.stdout = self._stdout
+
+    def tearDown(self):
+        sys.stdout = self._old
+        self.env.stop()
+        self.tmp.cleanup()
+
+    @property
+    def settings(self):
+        return self.root / ".claude" / "settings.local.json"
+
+    @property
+    def gitignore(self):
+        return self.root / ".gitignore"
+
+    def test_install_creates_local_settings_and_gitignore(self):
+        # Resolve from a nested subdir to prove the root walk works.
+        rc = hook.cmd_install("project", start_dir=self.root / "sub")
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.settings.is_file())
+        data = json.loads(self.settings.read_text())
+        self.assertEqual(
+            set(data["hooks"]), {"TaskCreated", "TaskCompleted", "TeammateIdle"}
+        )
+        # settings.local.json is now gitignored so it is never committed.
+        self.assertTrue(self.gitignore.is_file())
+        self.assertIn(
+            ".claude/settings.local.json", self.gitignore.read_text().splitlines()
+        )
+
+    def test_gitignore_idempotent_and_preserves_existing(self):
+        self.gitignore.write_text("node_modules\n", encoding="utf-8")
+        hook.cmd_install("project", start_dir=self.root)
+        hook.cmd_install("project", start_dir=self.root)
+        lines = self.gitignore.read_text().splitlines()
+        self.assertEqual(lines.count(".claude/settings.local.json"), 1)
+        self.assertIn("node_modules", lines)  # pre-existing content preserved
+
+    def test_gitignore_not_appended_when_already_covered(self):
+        # A broader pattern already ignores it -> we must not add a redundant line.
+        self.gitignore.write_text(".claude/\n", encoding="utf-8")
+        hook.cmd_install("project", start_dir=self.root)
+        self.assertNotIn(
+            ".claude/settings.local.json", self.gitignore.read_text().splitlines()
+        )
+
+    def test_uninstall_removes_only_ours(self):
+        pre = {
+            "hooks": {
+                "TaskCreated": [
+                    {"hooks": [{"type": "command", "command": "/other/tool run"}]}
+                ]
+            }
+        }
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text(json.dumps(pre))
+        hook.cmd_install("project", start_dir=self.root)
+        hook.cmd_uninstall("project", start_dir=self.root)
+        data = json.loads(self.settings.read_text())
+        cmds = [
+            h["command"]
+            for g in data.get("hooks", {}).get("TaskCreated", [])
+            for h in g["hooks"]
+        ]
+        self.assertEqual(cmds, ["/other/tool run"])
+        self.assertNotIn("TaskCompleted", data.get("hooks", {}))
+
+    def test_status_reflects_install_state(self):
+        self.assertEqual(hook.cmd_status("project", start_dir=self.root), 1)  # absent
+        hook.cmd_install("project", start_dir=self.root)
+        self.assertEqual(hook.cmd_status("project", start_dir=self.root), 0)  # present
+        hook.cmd_uninstall("project", start_dir=self.root)
+        self.assertEqual(hook.cmd_status("project", start_dir=self.root), 1)  # gone
+
+    def test_status_prints_resolved_path(self):
+        # Compare against settings_path()'s own resolution to be symlink-safe
+        # (macOS temp dirs live under /var -> /private/var).
+        expected = str(hook.settings_path("project", start_dir=self.root))
+        self._stdout.truncate(0)
+        self._stdout.seek(0)
+        hook.cmd_status("project", start_dir=self.root)
+        self.assertIn(expected, self._stdout.getvalue().strip().splitlines())
+
+    def test_non_repo_errors_nonzero(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as outside:
+            nonrepo = Path(outside)
+            self.assertEqual(hook.cmd_install("project", start_dir=nonrepo), 2)
+            self.assertEqual(hook.cmd_uninstall("project", start_dir=nonrepo), 2)
+            self.assertEqual(hook.cmd_status("project", start_dir=nonrepo), 2)
+            # And nothing was written.
+            self.assertFalse((nonrepo / ".claude").exists())
+
+    def test_user_scope_still_uses_override(self):
+        # Backward-compat: default scope is user, and the override still wins so
+        # existing callers are unaffected and never touch a real ~/.claude file.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "settings.json"
+            with mock.patch.dict(
+                os.environ, {"IT2AGENT_CLAUDE_SETTINGS": str(target)}, clear=False
+            ):
+                self.assertEqual(hook.cmd_install(), 0)  # default scope == user
+                self.assertTrue(target.is_file())
+                # No .gitignore side effect for user scope.
+                self.assertFalse((Path(d) / ".gitignore").exists())
+
+
+# --------------------------------------------------------------------------- #
+# Gate change (#96): installed ⇒ runs by default; EXPLICIT false is the only
+# kill-switch; unset/absent/true run; overrides work; always exit 0.
+# --------------------------------------------------------------------------- #
+
+
+class TestGateSemantics(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = Path(self.tmp.name) / "config.toml"
+        self.env = mock.patch.dict(
+            os.environ, {"IT2AGENT_CONFIG": str(self.cfg)}, clear=False
+        )
+        self.env.start()
+        os.environ.pop("IT2AGENT_FORCE", None)
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _write_flag(self, value):
+        self.cfg.write_text(
+            f'[features]\n"agent.team_bridge" = {value}\n', encoding="utf-8"
+        )
+
+    def test_absent_config_runs(self):
+        self.assertFalse(self.cfg.exists())
+        self.assertFalse(gate.team_bridge_kill_switched())
+        self.assertTrue(gate.gate_open())
+
+    def test_key_absent_from_table_runs(self):
+        self.cfg.write_text('[features]\n"agent.messaging" = true\n', encoding="utf-8")
+        self.assertFalse(gate.team_bridge_kill_switched())
+        self.assertTrue(gate.gate_open())
+
+    def test_explicit_true_runs(self):
+        self._write_flag("true")
+        self.assertFalse(gate.team_bridge_kill_switched())
+        self.assertTrue(gate.gate_open())
+
+    def test_explicit_false_is_kill_switch(self):
+        self._write_flag("false")
+        self.assertTrue(gate.team_bridge_kill_switched())
+        self.assertFalse(gate.gate_open())
+
+    def test_force_env_overrides_kill_switch(self):
+        self._write_flag("false")
+        with mock.patch.dict(os.environ, {"IT2AGENT_FORCE": "1"}, clear=False):
+            self.assertTrue(gate.gate_open())
+
+    def test_no_gate_overrides_kill_switch(self):
+        self._write_flag("false")
+        self.assertTrue(gate.gate_open(no_gate=True))
+
+    def _run_capturing(self, event, raw):
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            rc = hook.run_event(event, raw, no_gate=False)
+        finally:
+            sys.stdout = old
+        return rc, buf.getvalue()
+
+    def test_run_event_runs_when_unset(self):
+        with mock.patch.object(hook, "_send_to_broker") as send:
+            rc, out = self._run_capturing("idle", json.dumps(IDLE_PAYLOAD))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")  # observer never writes stdout
+        send.assert_called_once()
+
+    def test_run_event_no_op_when_kill_switched(self):
+        self._write_flag("false")
+        with mock.patch.object(hook, "_send_to_broker") as send:
+            rc, out = self._run_capturing("idle", json.dumps(IDLE_PAYLOAD))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        send.assert_not_called()
 
 
 if __name__ == "__main__":

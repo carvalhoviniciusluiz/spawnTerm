@@ -43,6 +43,28 @@ NS_ASSUME_NONNULL_BEGIN
 // when the pane appears so external TOML edits (feature flags) are reflected.
 + (void)invalidateCache;
 
+#pragma mark - Team Bridge (project-scoped Claude Code hook)
+
+// The Team Bridge capability is special: instead of flipping the global
+// config.toml flag, it installs/removes a Claude Code hook in the ACTIVE
+// project's gitignored .claude/settings.local.json (via it2agent-team-hook
+// --scope project). These helpers shell out with `directory` as the working
+// directory so the CLI resolves that project's git root.
+
+// Resolve the team-bridge target for `directory` (a session's working
+// directory). Returns YES if `directory` is inside a git repo (the checkbox can
+// act); then *resolvedPath (optional) receives the settings.local.json path and
+// *installed (optional) whether our hook is already present there. Returns NO if
+// it2agent-team-hook is unavailable or `directory` is not in a git repo, in
+// which case the checkbox should be disabled.
++ (BOOL)teamBridgeStatusForDirectory:(NSString *)directory
+                        resolvedPath:(NSString * _Nullable * _Nullable)resolvedPath
+                           installed:(nullable BOOL *)installed;
+
+// Best-effort project-scoped install (installed=YES) or uninstall (NO) of the
+// team-bridge hook for `directory`. Never throws; failures are logged.
++ (void)setTeamBridgeInstalled:(BOOL)installed forDirectory:(NSString *)directory;
+
 @end
 
 NS_ASSUME_NONNULL_END

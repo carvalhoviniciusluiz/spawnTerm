@@ -12,7 +12,9 @@
 #import "NSImage+iTerm.h"
 #import "NSTextField+iTerm.h"
 #import "NSWorkspace+iTerm.h"
+#import "PTYSession.h"
 #import "PasteboardHistory.h"
+#import "PseudoTerminal.h"
 #import "RegexKitLite.h"
 #import "WindowArrangements.h"
 #import "iTerm2SharedARC-Swift.h"
@@ -20,6 +22,7 @@
 #import "iTermAdvancedGPUSettingsViewController.h"
 #import "iTermApplicationDelegate.h"
 #import "iTermBuriedSessions.h"
+#import "iTermController.h"
 #import "iTermHotKeyController.h"
 #import "iTermNotificationCenter.h"
 #import "iTermPreferenceDidChangeNotification.h"
@@ -994,6 +997,10 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     // -setupAgentCapabilities (see there for why).
     IBOutlet NSView *_agentCapabilitiesView;
     NSArray<PreferenceInfo *> *_agentCapabilityInfos;
+    // Team Bridge is special: it targets the active project's gitignored
+    // settings.local.json (not the global flag). We keep a label showing the
+    // resolved target / guidance so it can be refreshed when the pane reappears.
+    NSTextField *_teamBridgeTargetLabel;
 
     IBOutlet NSButton *_useRecommendedModel;
     IBOutlet NSView *_manualAISettings;
@@ -1836,6 +1843,19 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
 // a synthetic getter/setter that delegates to it2agent-flag, mirroring the
 // _enableAI pattern, so config.toml stays authoritative and no flag logic is
 // reimplemented in ObjC.
+// Per-capability tooltip text, keyed by capability identifier. Only Team Bridge
+// needs one for now because its checkbox has a side effect beyond flipping the
+// flag: it also installs/removes a Claude Code hook in ~/.claude/settings.json.
+// Returns nil for capabilities that need no extra explanation.
+- (NSString *)toolTipForAgentCapability:(NSString *)capability {
+    static NSDictionary<NSString *, NSString *> *tooltips;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        tooltips = @{ @"team_bridge": @"Installs a Claude Code hook into the active project’s local, gitignored .claude/settings.local.json that mirrors agent-teams task and coordination state into the durable it2agent broker. It runs automatically on the next Claude Code session in that project. Unchecking removes only the entries it2agent added, leaving the rest of the file intact. Agent teams are experimental — you must enable them yourself by exporting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1; this checkbox does not set it." };
+    });
+    return tooltips[capability];
+}
+
 - (void)setupAgentCapabilities {
     NSView *container = _agentCapabilitiesView;
     if (!container) {
@@ -1892,6 +1912,7 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
         checkbox.target = self;
         checkbox.action = @selector(settingChanged:);
         checkbox.title = [iTermAgentCapabilities displayNameForCapability:capability];
+        checkbox.toolTip = [self toolTipForAgentCapability:capability];
         checkbox.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
         [container addSubview:checkbox];
 
@@ -1900,19 +1921,104 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
                                                key:key
                                        relatedView:nil
                                               type:kPreferenceInfoTypeCheckbox];
-        info.syntheticGetter = ^id{
-            return @([iTermAgentCapabilities isEnabledForCapability:capability]);
-        };
-        info.syntheticSetter = ^(id newValue) {
-            [iTermAgentCapabilities setEnabled:[newValue boolValue] forCapability:capability];
-        };
-        info.shouldBeEnabled = ^BOOL{
-            return [iTermAgentCapabilities available];
-        };
+        const BOOL isTeamBridge = [capability isEqualToString:@"team_bridge"];
+        if (isTeamBridge) {
+            // Team Bridge does NOT flip the global config.toml flag. Its state is
+            // whether our hook is present in the ACTIVE project's local settings,
+            // and toggling installs/removes it there (best-effort, project-scoped).
+            __weak __typeof(self) weakSelf = self;
+            info.syntheticGetter = ^id{
+                return @([weakSelf teamBridgeInstalledForActiveProject]);
+            };
+            info.syntheticSetter = ^(id newValue) {
+                [weakSelf setTeamBridgeInstalledForActiveProject:[newValue boolValue]];
+            };
+            info.shouldBeEnabled = ^BOOL{
+                return [iTermAgentCapabilities available] && [weakSelf teamBridgeActiveProjectIsGitRepo];
+            };
+        } else {
+            info.syntheticGetter = ^id{
+                return @([iTermAgentCapabilities isEnabledForCapability:capability]);
+            };
+            info.syntheticSetter = ^(id newValue) {
+                [iTermAgentCapabilities setEnabled:[newValue boolValue] forCapability:capability];
+            };
+            info.shouldBeEnabled = ^BOOL{
+                return [iTermAgentCapabilities available];
+            };
+        }
         [infos addObject:info];
     }];
 
+    // A full-width label under the grid, associated with the Team Bridge
+    // checkbox, showing the resolved target file (or guidance when there is no
+    // active git project to target). Fixed-frame like the rest of this pane.
+    _teamBridgeTargetLabel = [NSTextField labelWithString:@""];
+    _teamBridgeTargetLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+    _teamBridgeTargetLabel.textColor = [NSColor secondaryLabelColor];
+    ((NSCell *)_teamBridgeTargetLabel.cell).lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _teamBridgeTargetLabel.frame = NSMakeRect(leftMargin, 6, columnWidth * 2, headerHeight);
+    _teamBridgeTargetLabel.autoresizingMask = NSViewMaxXMargin | NSViewMinYMargin;
+    [container addSubview:_teamBridgeTargetLabel];
+
     _agentCapabilityInfos = [infos copy];
+    [self updateTeamBridgeTargetLabel];
+}
+
+#pragma mark - Team Bridge (project-scoped)
+
+// The working directory of the frontmost terminal session, or nil if there is
+// no active session (e.g. only the Settings window is open). currentTerminal
+// tracks the last-key terminal window even while Preferences is key.
+- (NSString *)teamBridgeActiveSessionDirectory {
+    PseudoTerminal *term = [[iTermController sharedInstance] currentTerminal];
+    PTYSession *session = [term currentSession];
+    return session.currentLocalWorkingDirectory;
+}
+
+- (BOOL)teamBridgeActiveProjectIsGitRepo {
+    NSString *dir = [self teamBridgeActiveSessionDirectory];
+    if (dir.length == 0) {
+        return NO;
+    }
+    return [iTermAgentCapabilities teamBridgeStatusForDirectory:dir resolvedPath:NULL installed:NULL];
+}
+
+- (BOOL)teamBridgeInstalledForActiveProject {
+    NSString *dir = [self teamBridgeActiveSessionDirectory];
+    if (dir.length == 0) {
+        return NO;
+    }
+    BOOL installed = NO;
+    [iTermAgentCapabilities teamBridgeStatusForDirectory:dir resolvedPath:NULL installed:&installed];
+    return installed;
+}
+
+- (void)setTeamBridgeInstalledForActiveProject:(BOOL)installed {
+    NSString *dir = [self teamBridgeActiveSessionDirectory];
+    if (dir.length == 0) {
+        DLog(@"Team Bridge toggle ignored: no active session working directory");
+        return;
+    }
+    [iTermAgentCapabilities setTeamBridgeInstalled:installed forDirectory:dir];
+    [self updateTeamBridgeTargetLabel];
+}
+
+- (void)updateTeamBridgeTargetLabel {
+    if (!_teamBridgeTargetLabel) {
+        return;
+    }
+    NSString *dir = [self teamBridgeActiveSessionDirectory];
+    NSString *resolved = nil;
+    BOOL inRepo = NO;
+    if (dir.length > 0 && [iTermAgentCapabilities available]) {
+        inRepo = [iTermAgentCapabilities teamBridgeStatusForDirectory:dir resolvedPath:&resolved installed:NULL];
+    }
+    if (inRepo && resolved.length > 0) {
+        _teamBridgeTargetLabel.stringValue = [NSString stringWithFormat:@"Aplica-se a: %@", resolved];
+    } else {
+        _teamBridgeTargetLabel.stringValue = @"Abra um terminal dentro de um projeto (git) para ativar.";
+    }
 }
 
 // Re-read config.toml when the pane is shown so external edits (CLI or hand
@@ -1929,7 +2035,11 @@ objectValueForTableColumn:(NSTableColumn *)tableColumn
     [iTermAgentCapabilities invalidateCache];
     for (PreferenceInfo *info in _agentCapabilityInfos) {
         [self updateValueForInfo:info];
+        // Team Bridge's enabled state depends on whether the active session is
+        // in a git repo, which can change between pane appearances; refresh it.
+        [self updateEnabledStateForInfo:info];
     }
+    [self updateTeamBridgeTargetLabel];
 }
 
 // The single source of per-prompt metadata: the preference key plus,
