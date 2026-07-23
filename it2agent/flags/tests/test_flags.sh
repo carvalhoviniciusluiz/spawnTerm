@@ -92,6 +92,12 @@ else
 fi
 echo "$SH_LIST" | grep -q "^agent.status_board *on$" && ok "list shows status_board on" || fail "list status_board"
 echo "$SH_LIST" | grep -q "^agent.janitor *off$" && ok "list shows janitor off" || fail "list janitor"
+# #87: native_status flag is registered and default OFF.
+echo "$SH_LIST" | grep -q "^agent.native_status *off$" && ok "list shows native_status off" || fail "list native_status"
+LIST_COUNT="$(printf '%s\n' "$SH_LIST" | grep -c '^agent\.')"
+[ "$LIST_COUNT" = "15" ] && ok "list shows 15 flags" || fail "list flag count = $LIST_COUNT, want 15"
+assert_query run_shell "shell: native_status accepted (OFF)" agent.native_status 0 1
+assert_query run_py    "py:    native_status accepted (OFF)" native_status           0 1
 
 echo "== canonical file byte-for-byte parity (shell vs python writer) =="
 reset
