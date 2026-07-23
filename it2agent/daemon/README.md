@@ -245,6 +245,28 @@ sessions (gated on `agent.broker`): `new_session` → `broker register
 vars read at register time. This is independent of the messaging relay — the
 registry reflects liveness even with messaging off.
 
+## Inbound native-state read (#115)
+
+Cooperation is otherwise **outbound** — we publish into the native surfaces
+(OSC 21337 tab status via `it2agent-emit ccstatus`, gate `agent.native_status`).
+The daemon adds a small **one-way inbound** read: at startup it enumerates the
+live iTerm2 sessions over the Python API and reflects what *native* knows about
+each — its name, the dot-free `user.agent_*` vars, and the native **cc-status /
+OSC 21337 tab-status** text — into our registry, so it2agent tools see what
+native sees. It is **read-only** on the native side and writes **only** our own
+registry (and, gated on `agent.broker`, the durable broker registry via the same
+`register` op as lifecycle events). It does **not** duplicate the Cockpit.
+
+The mapping is **pure and unit-tested** (`inbound.py`,
+`tests/test_inbound.py`): a session-record dict → a `RegistryOp`. Status
+precedence mirrors the native `WorkgroupIntrospection`: an explicit
+`agent_status` var wins; absent that, the native cc-status `statusText`
+(`working` / `waiting` / `idle`) is translated into our lifecycle vocabulary
+(`busy` / `blocked` / `idle`). Gating matches the rest of the daemon — it runs
+only inside the live `run()` loop (daemon up + Python API reachable); with no
+connection, or when the `iterm2` module is absent, it is a **clean no-op** and a
+bad per-session read degrades to an omitted field rather than aborting.
+
 ## Agent dashboard (status-bar component, #29)
 
 > **Re-scope note (#100):** this status-bar dashboard **duplicates the native

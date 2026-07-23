@@ -2341,3 +2341,14 @@ Bug Fixes:
   signal its agent to bounce its dev server;
   hot and rebuild are recognized no-op
   aliases.
+- it2agent daemon now does a one-way inbound
+  read: it reflects what native iTerm2 knows
+  about each live session — its name, the
+  dot-free user.agent_* variables, and the
+  native cc-status tab-status state — into the
+  it2agent registry, so it2agent tools see what
+  native sees. Read-only on the native side; it
+  only populates our own registry and does not
+  duplicate the Cockpit. Runs only when the
+  daemon is up and the Python API is reachable;
+  otherwise it is a clean no-op.

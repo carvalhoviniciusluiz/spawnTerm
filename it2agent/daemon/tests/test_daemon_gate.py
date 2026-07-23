@@ -20,6 +20,7 @@ class TestPurity(unittest.TestCase):
         import adapter  # noqa: F401
         import bridge  # noqa: F401
         import envelope  # noqa: F401
+        import inbound  # noqa: F401
         import registry  # noqa: F401
         import it2agent_daemon  # noqa: F401
 
