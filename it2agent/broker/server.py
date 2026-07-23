@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +27,45 @@ import mailbox  # noqa: F401 - registers the #35 send/poll/fetch/ack ops on impo
 import protocol
 import schema
 import store  # noqa: F401 - registers the #36 registry/handoff ops on import
+
+
+# The kernel's ``struct sockaddr_un.sun_path`` is a fixed-size buffer; a bind
+# whose path (plus its trailing NUL) overflows it fails deep in libc with a
+# terse ``OSError: AF_UNIX path too long``. The buffer is 104 bytes on Darwin/
+# BSD and 108 on Linux (see <sys/un.h>). Hardcoded rather than probed: there is
+# no portable runtime API for it, and these values are ABI-stable.
+_SUN_PATH_MAX = 104 if sys.platform == "darwin" else 108
+
+
+class SockPathTooLongError(Exception):
+    """Raised at startup when the unix socket path won't fit in sun_path.
+
+    Carries a ready-to-print, actionable message (the actual length vs. the
+    platform limit, plus a shorter-path suggestion) so the entry point can
+    surface a clean error instead of the raw ``OSError: AF_UNIX path too long``
+    traceback that :func:`asyncio.start_unix_server` would otherwise emit.
+    """
+
+
+def _check_sock_path_length(sock_path: Path) -> None:
+    """Fail fast if ``sock_path`` cannot fit in the platform's sun_path buffer.
+
+    The kernel needs room for the path *and* a trailing NUL, so a path whose
+    encoded length reaches the buffer size is already too long.
+    """
+    encoded = os.fsencode(str(sock_path))
+    if len(encoded) >= _SUN_PATH_MAX:
+        raise SockPathTooLongError(
+            "unix socket path is too long: {length} bytes, but this platform's "
+            "AF_UNIX limit is {limit} bytes (sun_path, including a trailing "
+            "NUL).\n"
+            "  path: {path}\n"
+            "Use a shorter socket path — e.g. a short dir under /tmp:\n"
+            "  --sock /tmp/it2a.$$/broker.sock   "
+            "(or set IT2AGENT_BROKER_SOCK=/tmp/it2a.$$.sock)".format(
+                length=len(encoded), limit=_SUN_PATH_MAX, path=sock_path
+            )
+        )
 
 
 class BrokerServer:
@@ -73,6 +114,10 @@ class BrokerServer:
         """
         self._loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
+        # Precheck before touching the filesystem: a too-long path would fail at
+        # bind() with an opaque ``OSError: AF_UNIX path too long``; raise a clear,
+        # actionable error instead (caught by :func:`run`).
+        _check_sock_path_length(self.sock_path)
         self._prepare()
         self.sock_path.parent.mkdir(parents=True, exist_ok=True)
         self._unlink_socket()
@@ -140,10 +185,19 @@ class BrokerServer:
         return dispatch.handle(request, self._ctx)
 
 
-def run(sock_path: str | Path, db_path: str | Path, logger: logging.Logger) -> None:
-    """Blocking entry point: serve until interrupted (Ctrl-C)."""
+def run(sock_path: str | Path, db_path: str | Path, logger: logging.Logger) -> int:
+    """Blocking entry point: serve until interrupted (Ctrl-C).
+
+    Returns a process exit code: 0 on a clean shutdown, nonzero when startup
+    fails with a known, user-actionable condition (currently a too-long socket
+    path — reported clearly to stderr rather than as a raw traceback).
+    """
     server = BrokerServer(sock_path, db_path, logger)
     try:
         asyncio.run(server.serve())
     except KeyboardInterrupt:
         logger.info("interrupted; shutting down")
+    except SockPathTooLongError as exc:
+        print(f"it2agent-broker: {exc}", file=sys.stderr)
+        return 1
+    return 0

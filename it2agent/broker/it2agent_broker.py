@@ -143,8 +143,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         return 0
     import server
 
-    server.run(_resolve_sock(args.sock), _resolve_db(args.db), logger)
-    return 0
+    return server.run(_resolve_sock(args.sock), _resolve_db(args.db), logger)
 
 
 def _cmd_client(op: str, args: argparse.Namespace) -> int:
