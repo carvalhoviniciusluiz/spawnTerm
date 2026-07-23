@@ -1,0 +1,120 @@
+#!/usr/bin/env sh
+# it2agent-install — create idempotent PATH wrappers for every it2agent shell CLI
+# so the GUI and the user can find them from anywhere (#120). Root sibling of the
+# umbrella (like it2agent-help / it2agent-guide) so `it2agent install` resolves
+# from a fresh checkout.
+#
+# The set of CLIs is enumerated DYNAMICALLY (every executable `it2agent`/
+# `it2agent-*` file in this repo, minus the python modules invoked via python3),
+# so a future CLI is wrapped automatically with no edit here.
+#
+# scope:external-tooling — pure shell glue: it writes tiny exec wrappers into a
+# bindir on PATH and never modifies iTerm2 source or re-implements anything.
+set -u
+
+PROG="it2agent-install"
+
+usage() {
+	cat <<EOF
+$PROG — install PATH wrappers for every it2agent shell CLI.
+
+Usage:
+  $PROG [--dir <bindir>]   Create/update a wrapper in <bindir> (default
+                           ~/.local/bin) for each it2agent CLI in this repo.
+  $PROG --list             Print the CLIs that would be wrapped, then exit.
+  $PROG -h | --help        Show this help.
+
+Idempotent: re-running rewrites wrappers in place (never duplicates). Creates
+<bindir> if missing and, when it is not on \$PATH, prints how to add it.
+EOF
+}
+
+# --- resolve this script's directory (the repo tooling dir, absolute) --------
+script_dir() {
+	d="$(dirname "$0")"
+	(cd "$d" 2>/dev/null && pwd)
+}
+ROOT="$(script_dir)"
+if [ -z "$ROOT" ]; then
+	printf '%s: cannot resolve script directory\n' "$PROG" >&2
+	exit 1
+fi
+
+BINDIR="$HOME/.local/bin"
+LIST_ONLY=0
+
+# --- parse args --------------------------------------------------------------
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-h|--help) usage; exit 0 ;;
+		--list) LIST_ONLY=1; shift ;;
+		--dir)
+			if [ "$#" -lt 2 ]; then
+				printf '%s: --dir requires an argument\n' "$PROG" >&2
+				exit 2
+			fi
+			BINDIR="$2"; shift 2 ;;
+		--dir=*) BINDIR="${1#--dir=}"; shift ;;
+		*)
+			printf '%s: unexpected argument: %s\n' "$PROG" "$1" >&2
+			usage >&2
+			exit 2 ;;
+	esac
+done
+
+# --- dynamic enumeration of it2agent shell CLIs ------------------------------
+# Every regular, executable file named `it2agent` or `it2agent-*` under the repo
+# tooling dir. The name glob already excludes the python modules (it2agent_*.py
+# use underscores) and the executable test drops data files (e.g. *.triggers.json).
+list_clis() {
+	find "$ROOT" -type f \( -name 'it2agent' -o -name 'it2agent-*' \) 2>/dev/null |
+	while IFS= read -r f; do
+		[ -x "$f" ] || continue
+		printf '%s\n' "$f"
+	done
+}
+
+if [ "$LIST_ONLY" -eq 1 ]; then
+	list_clis
+	exit 0
+fi
+
+# --- install -----------------------------------------------------------------
+if ! mkdir -p "$BINDIR" 2>/dev/null; then
+	printf '%s: cannot create bindir: %s\n' "$PROG" "$BINDIR" >&2
+	exit 1
+fi
+
+# Read the CLI list from a temp file (not a pipe) so the counter survives and
+# paths with spaces are handled correctly.
+tmpf="$(mktemp)"
+list_clis > "$tmpf"
+
+count=0
+printf 'Installing it2agent wrappers into %s:\n' "$BINDIR"
+while IFS= read -r cli; do
+	[ -n "$cli" ] || continue
+	name="$(basename "$cli")"
+	target="$BINDIR/$name"
+	if ! printf '#!/bin/sh\nexec "%s" "$@"\n' "$cli" > "$target"; then
+		printf '%s: cannot write wrapper: %s\n' "$PROG" "$target" >&2
+		rm -f "$tmpf"
+		exit 1
+	fi
+	chmod +x "$target"
+	count=$((count + 1))
+	printf '  %-26s -> %s\n' "$name" "$cli"
+done < "$tmpf"
+rm -f "$tmpf"
+
+printf 'Installed %s wrapper(s).\n' "$count"
+
+# --- PATH advice -------------------------------------------------------------
+case ":${PATH:-}:" in
+	*":$BINDIR:"*) : ;;
+	*)
+		printf '\nNote: %s is not on your $PATH.\n' "$BINDIR"
+		printf 'Add it by appending this line to your shell profile'
+		printf ' (~/.zshrc or ~/.profile):\n'
+		printf '  export PATH="%s:$PATH"\n' "$BINDIR" ;;
+esac

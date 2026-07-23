@@ -61,6 +61,18 @@ Major New Features:
   A new “it2agent brief” prints a short, live
   summary of what is turned on right now.
 
+- A new “it2agent install” command creates
+  PATH wrappers for every it2agent shell CLI
+  (in ~/.local/bin by default) so the app and
+  you can find them from anywhere. It replaces
+  hand-made wrappers that were fragile and
+  easy to miss — a missing one had kept Team
+  Bridge from enabling. The wrappers are
+  enumerated dynamically, so a future CLI is
+  covered with no extra work, and re-running
+  is idempotent. “it2agent uninstall” removes
+  only the wrappers it created.
+
 - A new agent capability, “Auto-Brief”
   (agent.autobrief, default OFF), installs a
   SessionStart Claude Code hook that injects
