@@ -382,6 +382,25 @@ as sessões nativas.
 
 ---
 
+## AC13 — Instalador de wrappers (descoberta reproduzível) 🤖
+Os CLIs do it2agent vivem no repo; `it2agent install` cria wrappers no PATH pra a GUI e o usuário
+os acharem de qualquer lugar (fix do gap que deixava o Team Bridge desabilitado por falta de wrapper).
+
+**Passo (headless, num bindir TEMPORÁRIO — não mexa no seu ~/.local/bin):**
+```sh
+BIN="$(mktemp -d)/bin"
+it2agent install --dir "$BIN" | tail -3
+ls "$BIN" | wc -l                                  # ~17 wrappers
+IT2AGENT_CONFIG="$(mktemp -d)/c.toml" "$BIN/it2agent-flag" list | head -1   # wrapper funciona de fato
+it2agent install --dir "$BIN" >/dev/null && echo "idempotente ok"           # 2ª run não duplica/erra
+touch "$BIN/alheio"; it2agent uninstall --dir "$BIN" >/dev/null; ls "$BIN"  # remove só os nossos; 'alheio' sobrevive
+```
+✅ se: `install` cria um wrapper por CLI (executável, apontando pro alvo certo no repo) e o
+`it2agent-flag list` via wrapper funciona; 2ª `install` é idempotente; `uninstall` remove **só** os
+nossos (o arquivo `alheio` permanece). Enumeração é **dinâmica** (CLIs futuros entram sozinhos).
+
+---
+
 ## Relatório final
 Devolva esta tabela, preenchida com **evidência real**:
 
@@ -399,6 +418,7 @@ Devolva esta tabela, preenchida com **evidência real**:
 | AC10 descoberta (autobrief/guia)  | 🤖👁   | | | |
 | AC11 Coastfile + --assign         | 🤖     | | | |
 | AC12 inbound nativo→registry      | 🤖🔴   | | | |
+| AC13 instalador de wrappers       | 🤖     | | | |
 
 Depois da tabela:
 1. **O que passou 🤖 agora** (AC2/AC3/AC4/AC5-idempotência/AC6-mecânica+durabilidade/AC7-mecânica/AC8
