@@ -401,6 +401,22 @@ nossos (o arquivo `alheio` permanece). Enumeração é **dinâmica** (CLIs futur
 
 ---
 
+## AC14 — Harness de fumaça AO VIVO (1 comando — a camada iTerm-API) 🔴🤖
+Atalho pra revalidar a camada onde os bugs live-only se escondem (spawn+cwd, tmux -CC, MCP launched,
+ccstatus) sem rodar tudo na mão. **Rode primeiro** — é o smoke mais rápido:
+```sh
+python3 "$ST/tests/live_smoke.py"            # 4 superfícies: PASS/FAIL/SKIP + evidência
+python3 "$ST/tests/live_smoke.py" --json     # saída machine-readable (futuro CI)
+python3 "$ST/tests/live_smoke.py" --only ccstatus   # escopar uma superfície
+```
+✅ se, com a **Python API ligada** no 3.7.dev: **spawn** (cwd real via `lsof` == repo + identidade),
+**tmux** (superfícies 2/4/5 PASS), **mcp** (`launched=true`), **ccstatus** (bytes OSC 21337) → todas
+**PASS**. Sem a API, as 3 superfícies vivas dão **SKIP honesto** (exit≠0, nada fingido) e o `ccstatus`
+ainda **PASS**. O harness **limpa tudo** (mata broker/tmux, remove repos/worktrees temporários, fecha
+só as abas que abriu). É o item "harness de fumaça ao vivo" do go-live.
+
+---
+
 ## Relatório final
 Devolva esta tabela, preenchida com **evidência real**:
 
@@ -419,6 +435,7 @@ Devolva esta tabela, preenchida com **evidência real**:
 | AC11 Coastfile + --assign         | 🤖     | | | |
 | AC12 inbound nativo→registry      | 🤖🔴   | | | |
 | AC13 instalador de wrappers       | 🤖     | | | |
+| AC14 harness de fumaça ao vivo    | 🔴🤖   | | | |
 
 Depois da tabela:
 1. **O que passou 🤖 agora** (AC2/AC3/AC4/AC5-idempotência/AC6-mecânica+durabilidade/AC7-mecânica/AC8
