@@ -596,9 +596,16 @@ class Harness:
                 reason=f"it2agent-tmux spawn exited {spawn.returncode}: "
                        f"{(spawn.stderr or '').strip()[:400]}",
             )
-        # Give the tmux -CC integration a moment to register the iTerm2 session
-        # before probing (bounded settle poll, not a concurrency workaround).
-        _wait_for_tmux_session(tmux_name, timeout=6.0)
+        # tmux -CC attaches the iTerm2 session ASYNCHRONOUSLY, a beat AFTER the
+        # tmux session exists. The validator needs the iTerm2-side session
+        # (tty=None) named after the cwd — so waiting on `tmux has-session` (the
+        # tmux side) alone is not enough and caused a false FAIL (#AC14). Wait for
+        # the tmux side to come up, then poll the iTerm2 app for the integrated
+        # session and validate against its REAL name (unambiguous match).
+        _wait_for_tmux_session(tmux_name, timeout=8.0)
+        observed = _wait_for_iterm_tmux_session(matcher, timeout=30.0)
+        if observed:
+            matcher = observed
 
         validate = subprocess.run(
             build_validate_tmux_cmd(self.python, matcher),
@@ -810,6 +817,44 @@ def _wait_for_tmux_session(name: str, timeout: float = 6.0) -> bool:  # pragma: 
             return True
         time.sleep(0.25)
     return False
+
+
+async def _await_tmux_iterm_session(connection, matcher, timeout):  # pragma: no cover - live
+    """Poll the iTerm2 app (single connection) until the integrated tmux -CC
+    session registers: a session whose `name` contains `matcher` AND whose `tty`
+    is None (the tell-tale of a tmux-CC-backed iTerm2 session). Returns the real
+    iTerm2 session name, or None on timeout."""
+    import asyncio
+    import iterm2
+
+    app = await iterm2.async_get_app(connection)
+    deadline = time.time() + timeout
+    ml = (matcher or "").lower()
+    while time.time() < deadline:
+        for window in app.terminal_windows:
+            for tab in window.tabs:
+                for session in tab.sessions:
+                    try:
+                        name = await session.async_get_variable("name") or ""
+                        tty = await session.async_get_variable("tty")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if ml in name.lower() and tty in (None, "None", ""):
+                        return name
+        await asyncio.sleep(0.5)
+    return None
+
+
+def _wait_for_iterm_tmux_session(matcher: str, timeout: float = 30.0) -> str | None:  # pragma: no cover - live
+    """Wait for the iTerm2-side integrated tmux -CC session to register (#AC14).
+
+    tmux -CC integration attaches the iTerm2 session ASYNCHRONOUSLY, a beat after
+    the tmux session itself exists — so `tmux has-session` succeeding does NOT
+    mean the validator can see the session yet. Waiting on the tmux side alone
+    caused a false FAIL (the validator ran before the iTerm2 session existed and,
+    correctly, refused to fall back to the current session). This polls the
+    iTerm2 app for the real integrated session and returns its name."""
+    return _run_live(_await_tmux_iterm_session, matcher, timeout)
 
 
 def _wait_for_socket(sock: str, deadline: float) -> bool:
