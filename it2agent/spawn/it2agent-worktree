@@ -83,6 +83,13 @@ DEFAULT_SPAN=1000
 DEFAULT_CANONICAL_BASE=3000
 SLUG_MAX=40
 
+# Optional per-project declaration file (item 7, the "Coastfile"). When present
+# at <git-root>/.it2agent/isolation.toml it declares the isolation defaults once
+# — ports / canonical / isolate / assign — so an operator does not have to pass
+# --ports/--isolate/etc on every spawn. Explicit CLI flags always OVERRIDE the
+# file; no file => byte-identical to prior behavior. See apply_coastfile.
+COASTFILE_REL=".it2agent/isolation.toml"
+
 # Field separator for the ls/status reporter's intermediate records. A US (unit
 # separator, \037) is deliberate: it is NOT IFS-whitespace, so `read` preserves
 # EMPTY fields instead of coalescing them (a tab would collapse an empty
@@ -343,6 +350,149 @@ resolve_repo() {
 	top="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null)" \
 		|| die "not inside a git repository: $base"
 	REPO_ROOT="$(canon_dir "$top")"
+}
+
+# --- Coastfile: optional per-project declaration (item 7) --------------------
+# A single optional file at <git-root>/.it2agent/isolation.toml lets a repo
+# declare its isolation defaults ONCE instead of passing --ports/--isolate/etc
+# on every spawn. Only four top-level keys are honored (a tiny, dependency-free
+# parser — NOT a general TOML reader):
+#
+#     ports     = ["web", "db"]     # -> --ports web,db
+#     isolate   = ["docker", "db"]  # -> --isolate docker,db
+#     canonical = 3000              # -> --canonical-port 3000 (int); `true`
+#                                   #    selects the default base, `false`/other
+#                                   #    is ignored (canonical activation is via
+#                                   #    the agent.canonical_port flag)
+#     assign    = "restart"         # -> --assign restart
+#
+# Explicit CLI flags ALWAYS override the file (see apply_coastfile). Anything
+# else — unknown keys, section headers ([ports]), comments, malformed values —
+# is ignored so a stray/partial file degrades safely to prior behavior. No file
+# => nothing changes.
+
+coastfile_path() {
+	printf '%s/%s' "$REPO_ROOT" "$COASTFILE_REL"
+}
+
+# coast_trim: echo $1 with leading/trailing whitespace removed.
+coast_trim() {
+	printf '%s' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+# coast_unquote: strip one layer of surrounding single/double quotes from $1.
+coast_unquote() {
+	_v="$1"
+	case "$_v" in
+		\"*\") _v="${_v#\"}"; _v="${_v%\"}" ;;
+		\'*\') _v="${_v#\'}"; _v="${_v%\'}" ;;
+	esac
+	printf '%s' "$_v"
+}
+
+# coast_scalar: normalize a TOML scalar value into a bare token — drops an inline
+# `# comment`, trims, and unquotes. Values here are ints/bools/short strings with
+# no `#`, so this stays correct and minimal.
+coast_scalar() {
+	_v="${1%%#*}"
+	_v="$(coast_trim "$_v")"
+	coast_unquote "$_v"
+}
+
+# coast_array: turn a TOML inline array `["a", "b"]` into a comma-joined CSV
+# `a,b`, unquoting and trimming each element and dropping empties. Brackets are
+# removed literally (our array members never contain `[` or `]`).
+coast_array() {
+	_raw="$(printf '%s' "$1" | tr -d '[]')"
+	_out=""
+	_oldifs="$IFS"; IFS=','
+	for _el in $_raw; do
+		IFS="$_oldifs"
+		_el="$(coast_unquote "$(coast_trim "$_el")")"
+		_el="$(coast_trim "$_el")"
+		[ -n "$_el" ] && _out="${_out:+$_out,}$_el"
+		IFS=','
+	done
+	IFS="$_oldifs"
+	printf '%s' "$_out"
+}
+
+# read_coastfile: parse the Coastfile (if any) into COAST_PORTS / COAST_ISOLATE /
+# COAST_CANONICAL / COAST_ASSIGN. Each stays empty when the file or key is absent.
+read_coastfile() {
+	COAST_PORTS=""; COAST_ISOLATE=""; COAST_CANONICAL=""; COAST_ASSIGN=""
+	_cf="$(coastfile_path)"
+	[ -f "$_cf" ] || return 0
+	# `|| [ -n "$line" ]` so a final line with no trailing newline is still read.
+	while IFS= read -r _line || [ -n "$_line" ]; do
+		_line="$(coast_trim "$_line")"
+		case "$_line" in
+			'' | '#'* | '['*) continue ;;   # blank / comment / section header
+			*=*) ;;
+			*) continue ;;
+		esac
+		_key="$(coast_trim "${_line%%=*}")"
+		_val="${_line#*=}"
+		case "$_key" in
+			ports)     COAST_PORTS="$(coast_array "$_val")" ;;
+			isolate)   COAST_ISOLATE="$(coast_array "$_val")" ;;
+			canonical) COAST_CANONICAL="$(coast_scalar "$_val")" ;;
+			assign)    COAST_ASSIGN="$(coast_scalar "$_val")" ;;
+			*) ;;   # unknown key -> ignore (degrade safely)
+		esac
+	done < "$_cf"
+}
+
+# apply_coastfile: fold the Coastfile defaults into the resolved options, but
+# ONLY for options the operator did not set explicitly on the CLI (the *_SET
+# flags) — explicit flags always win. Runs after resolve_repo (needs REPO_ROOT)
+# and before parse_isolate / the numeric validations, which then see the merged
+# values. A missing file leaves everything untouched.
+apply_coastfile() {
+	read_coastfile
+	if [ "$PORTS_SET" != "1" ] && [ -n "$COAST_PORTS" ]; then
+		PORTS_CSV="$COAST_PORTS"
+	fi
+	if [ "$ISOLATE_SET" != "1" ] && [ -n "$COAST_ISOLATE" ]; then
+		ISOLATE_CSV="$COAST_ISOLATE"
+	fi
+	if [ "$CANONICAL_SET" != "1" ] && [ -n "$COAST_CANONICAL" ]; then
+		case "$COAST_CANONICAL" in
+			true|True|TRUE)    : ;;   # intent only; keep the default base
+			false|False|FALSE) : ;;   # explicit opt-out; nothing to apply
+			'' | *[!0-9]*)
+				warn "isolation.toml: ignoring non-integer canonical='$COAST_CANONICAL'" ;;
+			*) CANONICAL_BASE="$COAST_CANONICAL" ;;
+		esac
+	fi
+	if [ "$ASSIGN_SET" != "1" ] && [ -n "$COAST_ASSIGN" ]; then
+		ASSIGN="$COAST_ASSIGN"
+	fi
+}
+
+# --- --assign (item 8): thin per-switch service hook -------------------------
+# `--assign <strategy>` says what to do with a service when a worktree is reused
+# (re-created for an id that already has one). It is a THIN hook, not a process
+# supervisor:
+#   none    (default) reuse the worktree untouched — today's idempotent behavior.
+#   restart signal the agent to bounce its dev server: `create` emits
+#           `assign=restart` and exports IT2AGENT_ASSIGN=restart (via env_) so the
+#           wrappers/agent command can react. We invoke nothing ourselves.
+#   hot     recognized aliases that map to `none` (documented no-ops): full
+#   rebuild file-watch / image-rebuild orchestration is out of scope for a macOS
+#           CLI that does not own the supervisor (research flagged them as
+#           ceremony for our tab-per-agent model).
+# Any other value is a hard error. Normalizes ASSIGN in place; call after
+# apply_coastfile so a Coastfile-declared value is validated the same way.
+resolve_assign() {
+	case "$ASSIGN" in
+		none | restart) ;;
+		hot | rebuild)
+			warn "--assign $ASSIGN is a recognized no-op alias (mapped to 'none'; it2agent does not own a process supervisor)"
+			ASSIGN="none" ;;
+		*)
+			die "--assign: unknown strategy '$ASSIGN' (valid: none, restart; hot/rebuild recognized as no-op aliases of none)" ;;
+	esac
 }
 
 # --- free-port probing (side-effect layer) -----------------------------------
@@ -748,6 +898,19 @@ print_isolate() {
 	return 0
 }
 
+# print_assign (item 8): emit the resolved --assign strategy when it is not the
+# default `none`. `restart` prints an `assign=restart` summary AND an
+# `env_IT2AGENT_ASSIGN=restart` line so the wrappers export IT2AGENT_ASSIGN into
+# the session — the thin hook the agent command keys on to bounce its dev server.
+# When ASSIGN is `none` (the default, including hot/rebuild after normalization)
+# nothing is emitted, so the output stays byte-identical to before.
+print_assign() {
+	[ "$ASSIGN" = "none" ] && return 0
+	printf 'assign=%s\n' "$ASSIGN"
+	printf 'env_IT2AGENT_ASSIGN=%s\n' "$ASSIGN"
+	return 0
+}
+
 # --- git plan runner ---------------------------------------------------------
 # run_git: in dry-run print the command; otherwise execute it (git chatter to
 # stderr so stdout stays machine-parseable).
@@ -799,6 +962,10 @@ cmd_create() {
 	# flag. Emits env_<NAME>=<value> lines the wrappers export. Works the same in
 	# --dry-run (there are no side effects to withhold — nothing is run/created).
 	print_isolate
+
+	# Assign hook (item 8): emit the resolved strategy (restart) so the wrappers /
+	# agent command can react on worktree reuse. `none` emits nothing.
+	print_assign
 
 	if [ "$DRYRUN" = "1" ]; then
 		printf 'would-run: mkdir -p %s\n' "$(dirname "$WORKTREE")"
@@ -1187,6 +1354,13 @@ Common options:
                      mode emits nothing unless its flag is ON (or --no-gate).
 
 create options:
+  --assign <strategy>
+                     What to do with a service when a worktree is REUSED
+                     (item 8, a thin hook — no supervisor):
+                       none     (default) reuse untouched (idempotent).
+                       restart  emit assign=restart + export IT2AGENT_ASSIGN so
+                                the agent command bounces its dev server.
+                       hot|rebuild  recognized no-op aliases mapped to none.
   --dry-run          Print the git commands + allocation; execute nothing.
   --no-probe         Skip free-port probing AND leasing; use the deterministic
                      port as-is (back-compat; identical to the pure plan).
@@ -1218,6 +1392,15 @@ cleanup options:
 ls / status options:
   --json             Emit a JSON array instead of a table (status default is a
                      table too; --json switches either command to JSON).
+
+Coastfile (optional, item 7):
+  <git-root>/.it2agent/isolation.toml declares defaults ONCE so you don't pass
+  the flags every spawn. Honored keys (explicit CLI flags override the file):
+    ports     = ["web", "db"]      # = --ports web,db
+    isolate   = ["docker", "db"]   # = --isolate docker,db
+    canonical = 3000               # = --canonical-port 3000 (int; true = default)
+    assign    = "restart"          # = --assign restart
+  No file => behavior is unchanged. Unknown keys / bad values are ignored.
 
 Environment:
   IT2AGENT_WORKTREE_ROOT   Override the parent dir for all worktrees.
@@ -1255,13 +1438,18 @@ BASE_REF=""
 LEASE_PID=0
 JSON=0
 PORTS_CSV=""
+PORTS_SET=0          # 1 when --ports was given on the CLI (overrides Coastfile)
 CANONICAL_BASE="$DEFAULT_CANONICAL_BASE"
+CANONICAL_SET=0      # 1 when --canonical-port was given on the CLI
 CANONICAL_TAKEOVER=0
 RELEASE=0
 ISOLATE_CSV=""       # accumulated --isolate list(s); parsed by parse_isolate
+ISOLATE_SET=0        # 1 when --isolate was given on the CLI (overrides Coastfile)
 ISOLATE_DOCKER=0
 ISOLATE_DB=0
 DB_MODE="schema"     # schema (default) | database, set by --isolate db=...
+ASSIGN="none"        # --assign strategy (item 8): none|restart (hot/rebuild->none)
+ASSIGN_SET=0         # 1 when --assign was given on the CLI (overrides Coastfile)
 
 [ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
 
@@ -1281,12 +1469,14 @@ while [ $# -gt 0 ]; do
 		--span=*) SPAN="${1#--span=}"; shift ;;
 		--base) [ $# -ge 2 ] || die "--base requires a <ref>"; BASE_REF="$2"; shift 2 ;;
 		--base=*) BASE_REF="${1#--base=}"; shift ;;
-		--ports) [ $# -ge 2 ] || die "--ports requires a comma-separated list"; PORTS_CSV="$2"; shift 2 ;;
-		--ports=*) PORTS_CSV="${1#--ports=}"; shift ;;
-		--isolate) [ $# -ge 2 ] || die "--isolate requires a list (docker, db, db=schema, db=database)"; ISOLATE_CSV="${ISOLATE_CSV:+$ISOLATE_CSV,}$2"; shift 2 ;;
-		--isolate=*) ISOLATE_CSV="${ISOLATE_CSV:+$ISOLATE_CSV,}${1#--isolate=}"; shift ;;
-		--canonical-port) [ $# -ge 2 ] || die "--canonical-port requires a value"; CANONICAL_BASE="$2"; shift 2 ;;
-		--canonical-port=*) CANONICAL_BASE="${1#--canonical-port=}"; shift ;;
+		--ports) [ $# -ge 2 ] || die "--ports requires a comma-separated list"; PORTS_CSV="$2"; PORTS_SET=1; shift 2 ;;
+		--ports=*) PORTS_CSV="${1#--ports=}"; PORTS_SET=1; shift ;;
+		--isolate) [ $# -ge 2 ] || die "--isolate requires a list (docker, db, db=schema, db=database)"; ISOLATE_CSV="${ISOLATE_CSV:+$ISOLATE_CSV,}$2"; ISOLATE_SET=1; shift 2 ;;
+		--isolate=*) ISOLATE_CSV="${ISOLATE_CSV:+$ISOLATE_CSV,}${1#--isolate=}"; ISOLATE_SET=1; shift ;;
+		--assign) [ $# -ge 2 ] || die "--assign requires a strategy (none, restart; hot/rebuild recognized)"; ASSIGN="$2"; ASSIGN_SET=1; shift 2 ;;
+		--assign=*) ASSIGN="${1#--assign=}"; ASSIGN_SET=1; shift ;;
+		--canonical-port) [ $# -ge 2 ] || die "--canonical-port requires a value"; CANONICAL_BASE="$2"; CANONICAL_SET=1; shift 2 ;;
+		--canonical-port=*) CANONICAL_BASE="${1#--canonical-port=}"; CANONICAL_SET=1; shift ;;
 		--canonical-takeover) CANONICAL_TAKEOVER=1; shift ;;
 		--release) RELEASE=1; shift ;;
 		--dry-run) DRYRUN=1; shift ;;
@@ -1304,12 +1494,21 @@ while [ $# -gt 0 ]; do
 done
 
 is_uint "$LEASE_PID" || die "--lease-pid must be a non-negative integer"
-is_uint "$CANONICAL_BASE" || die "--canonical-port must be a non-negative integer"
-# Validate/normalize --isolate up front so `namespace` (and typos) are rejected
-# for every command, not just create.
-parse_isolate
 
 resolve_repo "$REPO_ARG"
+
+# Fold in the optional Coastfile (item 7) now that REPO_ROOT is known: it fills
+# ports/isolate/canonical/assign for options the CLI did not set explicitly, so
+# the validations and parse_isolate below see the merged values. No file => no
+# change. Explicit CLI flags always override.
+apply_coastfile
+
+is_uint "$CANONICAL_BASE" || die "--canonical-port must be a non-negative integer"
+# Validate/normalize --assign (item 8) and --isolate (rejecting `namespace` and
+# typos) for every command, not just create — after the Coastfile merge so a
+# file-declared value is validated identically to a CLI one.
+resolve_assign
+parse_isolate
 
 case "$CMD" in
 	plan)

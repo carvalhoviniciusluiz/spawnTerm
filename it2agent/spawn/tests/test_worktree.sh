@@ -512,6 +512,111 @@ unset IT2AGENT_CONFIG
 unset IT2AGENT_NO_TCP_PROBE
 
 echo
+echo "--- 12. Coastfile .it2agent/isolation.toml (item 7): declare defaults once ---"
+# A fresh repo whose .it2agent/isolation.toml declares ports/canonical/isolate/
+# assign. --no-gate bypasses every self-gate so the file-driven exports actually
+# surface; NO_TCP_PROBE keeps port leasing deterministic. Explicit CLI flags must
+# OVERRIDE the file, an absent file must change nothing, and malformed keys must
+# degrade safely.
+COASTREPO="$TMP/coastrepo"
+mkdir -p "$COASTREPO/.it2agent"
+git -C "$COASTREPO" init -q
+git -C "$COASTREPO" symbolic-ref HEAD refs/heads/main
+git -C "$COASTREPO" config user.email t@example.com
+git -C "$COASTREPO" config user.name test
+printf 'x\n' > "$COASTREPO/f"; git -C "$COASTREPO" add f; git -C "$COASTREPO" commit -qm init
+export IT2AGENT_WORKTREE_ROOT="$TMP/coastwt"
+export IT2AGENT_NO_TCP_PROBE=1
+cat > "$COASTREPO/.it2agent/isolation.toml" <<'TOML'
+# per-project isolation defaults (item 7)
+[section-headers-are-ignored]
+ports     = ["web", "db"]
+canonical = 8080          # inline comments are stripped
+isolate   = ["docker", "db"]
+assign    = "restart"
+unknown_key = "ignored"
+TOML
+
+# 12a. file present, no CLI flags -> every declared default is applied.
+cf="$(sh "$WT" create --repo "$COASTREPO" --id coast_all --role worker --no-gate 2>/dev/null)"
+assert_contains "coastfile ports applied: port_web present"  "port_web="  "$cf"
+assert_contains "coastfile ports applied: port_db present"   "port_db="   "$cf"
+assert_contains "coastfile canonical base applied (web=8080)" "canonical_port_web=8080" "$cf"
+assert_contains "coastfile isolate applied: docker export"   "env_COMPOSE_PROJECT_NAME=" "$cf"
+assert_contains "coastfile isolate applied: db schema export" "env_IT2AGENT_DB_SCHEMA="  "$cf"
+assert_contains "coastfile isolate summary lists both"       "isolate=docker,db=schema" "$cf"
+assert_contains "coastfile assign applied: assign=restart"   "assign=restart" "$cf"
+assert_contains "coastfile assign exports IT2AGENT_ASSIGN"    "env_IT2AGENT_ASSIGN=restart" "$cf"
+
+# 12b. explicit CLI flags OVERRIDE the file value.
+ov="$(sh "$WT" create --repo "$COASTREPO" --id coast_ov --role worker --no-gate \
+	--ports api --canonical-port 9090 --isolate docker --assign none 2>/dev/null)"
+assert_contains "CLI --ports overrides file: port_api present"   "port_api="  "$ov"
+assert_not_contains "CLI --ports overrides file: no port_web"    "port_web="  "$ov"
+assert_contains "CLI --canonical-port overrides file (api=9090)" "canonical_port_api=9090" "$ov"
+assert_not_contains "CLI --isolate docker overrides file: no db schema" "IT2AGENT_DB_SCHEMA" "$ov"
+assert_not_contains "CLI --assign none overrides file: no assign line"  "assign="    "$ov"
+
+# 12c. no Coastfile -> byte-compat (no file-driven port_/isolate/assign lines).
+NOCF="$TMP/nocoastrepo"
+mkdir -p "$NOCF"
+git -C "$NOCF" init -q
+git -C "$NOCF" symbolic-ref HEAD refs/heads/main
+git -C "$NOCF" config user.email t@example.com
+git -C "$NOCF" config user.name test
+printf 'x\n' > "$NOCF/f"; git -C "$NOCF" add f; git -C "$NOCF" commit -qm init
+nf="$(sh "$WT" create --repo "$NOCF" --id nocoast --role worker --no-gate 2>/dev/null)"
+assert_not_contains "no coastfile: no port_<name> lines" "port_"    "$nf"
+assert_not_contains "no coastfile: no isolate summary"   "isolate=" "$nf"
+assert_not_contains "no coastfile: no assign line"       "assign="  "$nf"
+
+# 12d. malformed / empty / unknown keys degrade safely (no crash, exit 0).
+BADCF="$TMP/badcoastrepo"
+mkdir -p "$BADCF/.it2agent"
+git -C "$BADCF" init -q
+git -C "$BADCF" symbolic-ref HEAD refs/heads/main
+git -C "$BADCF" config user.email t@example.com
+git -C "$BADCF" config user.name test
+printf 'x\n' > "$BADCF/f"; git -C "$BADCF" add f; git -C "$BADCF" commit -qm init
+cat > "$BADCF/.it2agent/isolation.toml" <<'TOML'
+this line has no equals and must be skipped
+ports = []
+canonical = notanumber
+zzz = ["also", "ignored"]
+TOML
+assert_exit "malformed coastfile: create still exits 0" 0 \
+	sh "$WT" create --repo "$BADCF" --id badcoast --role worker --no-gate
+bad="$(sh "$WT" create --repo "$BADCF" --id badcoast2 --role worker --no-gate 2>/dev/null)"
+assert_not_contains "empty ports array yields no port_<name> lines" "port_" "$bad"
+
+unset IT2AGENT_NO_TCP_PROBE
+
+echo
+echo "--- 13. --assign none|restart (item 8): thin hook + alias/garbage handling ---"
+# Validation runs for every command, so accept/reject can be exercised on the
+# pure `plan` (no gate). The restart EMISSION is exercised on create --no-gate.
+assert_exit "--assign none accepted (exit 0)"    0 sh "$WT" plan --repo "$COASTREPO" --id as1 --role worker --assign none
+assert_exit "--assign restart accepted (exit 0)" 0 sh "$WT" plan --repo "$COASTREPO" --id as2 --role worker --assign restart
+assert_exit "--assign hot accepted as alias (exit 0)"     0 sh "$WT" plan --repo "$COASTREPO" --id as3 --role worker --assign hot
+assert_exit "--assign rebuild accepted as alias (exit 0)" 0 sh "$WT" plan --repo "$COASTREPO" --id as4 --role worker --assign rebuild
+assert_exit "--assign garbage rejected (exit 2)" 2 sh "$WT" plan --repo "$COASTREPO" --id as5 --role worker --assign bogus
+garb="$(sh "$WT" plan --repo "$COASTREPO" --id as6 --role worker --assign bogus 2>&1)"
+assert_contains "--assign garbage error names the bad value" "unknown strategy 'bogus'" "$garb"
+hotwarn="$(sh "$WT" plan --repo "$COASTREPO" --id as7 --role worker --assign hot 2>&1)"
+assert_contains "--assign hot warns it maps to none" "mapped to 'none'" "$hotwarn"
+
+export IT2AGENT_NO_TCP_PROBE=1
+export IT2AGENT_WORKTREE_ROOT="$TMP/assignwt"
+asr="$(sh "$WT" create --repo "$NOCF" --id assign_restart --role worker --no-gate --assign restart 2>/dev/null)"
+assert_contains "--assign restart emits assign=restart on create" "assign=restart" "$asr"
+assert_contains "--assign restart exports IT2AGENT_ASSIGN"         "env_IT2AGENT_ASSIGN=restart" "$asr"
+asn="$(sh "$WT" create --repo "$NOCF" --id assign_none --role worker --no-gate --assign none 2>/dev/null)"
+assert_not_contains "--assign none emits no assign line (byte-compat)" "assign=" "$asn"
+ash="$(sh "$WT" create --repo "$NOCF" --id assign_hot --role worker --no-gate --assign hot 2>/dev/null)"
+assert_not_contains "--assign hot (alias->none) emits no assign line" "assign=" "$ash"
+unset IT2AGENT_NO_TCP_PROBE
+
+echo
 echo "--- 6. exit codes / usage ---"
 assert_exit "--help exits 0"                 0 sh "$WT" --help
 assert_exit "missing command exits 2"        2 sh "$WT"

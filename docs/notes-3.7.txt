@@ -2328,3 +2328,16 @@ Bug Fixes:
   gated by its own capability (Docker Isolation
   / DB Isolation). “namespace” is rejected on
   macOS with a pointer to docker.
+- it2agent worktree isolation adds two
+  conveniences on top of the above. A
+  per-project file, .it2agent/isolation.toml,
+  can declare ports, the canonical port,
+  isolate modes, and the assign strategy once,
+  so you don’t retype them on every spawn;
+  explicit command-line flags still override
+  the file, and no file means unchanged
+  behavior. And a new --assign option (none by
+  default, or restart) lets a reused worktree
+  signal its agent to bounce its dev server;
+  hot and rebuild are recognized no-op
+  aliases.
