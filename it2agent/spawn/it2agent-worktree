@@ -68,6 +68,13 @@ DEFAULT_BASE_PORT=41000
 DEFAULT_SPAN=1000
 SLUG_MAX=40
 
+# Field separator for the ls/status reporter's intermediate records. A US (unit
+# separator, \037) is deliberate: it is NOT IFS-whitespace, so `read` preserves
+# EMPTY fields instead of coalescing them (a tab would collapse an empty
+# "changes"/"reason" field and shift every later column). It also never occurs
+# in a branch name or a real worktree path.
+REC_SEP="$(printf '\037')"
+
 die() {
 	printf '%s: %s\n' "$PROG" "$1" >&2
 	exit 2
@@ -180,6 +187,23 @@ is_uint() {
 	esac
 }
 
+# compute_wt_root: sets WT_ROOT (the per-repo worktree parent) and LEASES_DIR
+# (the shared lease dir beside it) from REPO_ROOT alone — no agent id needed, so
+# the read-only reporters (ls/status) can locate leases without a plan. Pure.
+# The lease dir is shared by every concurrent spawn of this repo and is
+# canonicalized like WORKTREE so independent processes agree on the path. It is
+# only ever CREATED by the side-effecting allocation path, never here.
+compute_wt_root() {
+	if [ -n "${IT2AGENT_WORKTREE_ROOT:-}" ]; then
+		WT_ROOT="$IT2AGENT_WORKTREE_ROOT"
+	else
+		repo_parent="$(dirname "$REPO_ROOT")"
+		repo_base="$(basename "$REPO_ROOT")"
+		WT_ROOT="$repo_parent/.it2agent-worktrees/$repo_base"
+	fi
+	LEASES_DIR="$(canon_existing "$WT_ROOT/.leases")"
+}
+
 # compute_plan: sets BRANCH, WORKTREE, PORT, NAMESPACE, HASH, HASH6, SLUG from
 # the resolved inputs REPO_ROOT, AGENT_ID, ROLE, TASK, BASE_PORT, SPAN. Pure.
 compute_plan() {
@@ -200,21 +224,8 @@ compute_plan() {
 	BRANCH="it2agent/${SLUG}-${HASH6}"
 
 	leaf="${SLUG}-${HASH6}"
-	if [ -n "${IT2AGENT_WORKTREE_ROOT:-}" ]; then
-		wt_root="$IT2AGENT_WORKTREE_ROOT"
-	else
-		repo_parent="$(dirname "$REPO_ROOT")"
-		repo_base="$(basename "$REPO_ROOT")"
-		wt_root="$repo_parent/.it2agent-worktrees/$repo_base"
-	fi
-	WORKTREE="$(canon_existing "$wt_root/$leaf")"
-
-	# Lease dir sits beside the per-repo worktrees and is shared by every
-	# concurrent spawn of this repo. Canonicalized like WORKTREE so independent
-	# processes agree on the path. Computed here (pure) but only CREATED by the
-	# side-effecting allocation path, so plan/env stay side-effect-free.
-	WT_ROOT="$wt_root"
-	LEASES_DIR="$(canon_existing "$wt_root/.leases")"
+	compute_wt_root
+	WORKTREE="$(canon_existing "$WT_ROOT/$leaf")"
 
 	# port int from first 7 hex chars (fits signed 32-bit shell arithmetic).
 	port_hex="$(printf '%s' "$HASH" | cut -c1-7)"
@@ -587,6 +598,137 @@ cmd_env() {
 	printf 'export IT2AGENT_BRANCH=%s\n' "$BRANCH"
 }
 
+# --- ls / status (read-only observability reporter) --------------------------
+# Composes what already exists — `git worktree list --porcelain` (filtered to the
+# it2agent/<role>-<id>-<hash> branch scheme), the `.leases/` dir, and per-worktree
+# `git status --porcelain` — into a table (`ls`) or JSON (`status`/`--json`). It
+# is a PURE reader: it allocates no port, creates no worktree, and never touches
+# settings or leases. Stale entries (worktree gone, or a lease whose owner pid is
+# dead — the same reclaim rule the allocator uses in lease_stale) are only
+# REPORTED, never deleted.
+
+# lease_owner_for_worktree <worktree-path>: prints "<port> <pid>" for the lease
+# whose worktree matches, else nothing. Read-only scan of LEASES_DIR.
+lease_owner_for_worktree() {
+	[ -d "$LEASES_DIR" ] || return 0
+	for lf in "$LEASES_DIR"/*.lease; do
+		[ -f "$lf" ] || continue
+		l_wt="$(sed -n 's/^worktree=//p' "$lf" 2>/dev/null | head -1)"
+		if [ "$l_wt" = "$1" ]; then
+			l_port="$(basename "$lf" .lease)"
+			l_pid="$(sed -n 's/^pid=//p' "$lf" 2>/dev/null | head -1)"
+			printf '%s %s' "$l_port" "${l_pid:-0}"
+			return 0
+		fi
+	done
+}
+
+# emit_record <worktree-path> <branch>: print one REC_SEP-separated record
+#   branch  worktree  port  changes  stale  reason
+# port is empty when unleased; changes is empty when the worktree dir is gone;
+# stale is 0/1; reason is "" / worktree-gone / owner-dead.
+emit_record() {
+	_wt="$1"; _br="$2"
+	_port=""; _pid=0
+	_owner="$(lease_owner_for_worktree "$_wt")"
+	if [ -n "$_owner" ]; then
+		_port="${_owner% *}"
+		_pid="${_owner#* }"
+	fi
+	_stale=0; _reason=""; _changes=""
+	if [ ! -d "$_wt" ]; then
+		_stale=1; _reason="worktree-gone"
+	else
+		_changes="$(git -C "$_wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+		if [ "$_pid" != "0" ] && ! pid_alive "$_pid"; then
+			_stale=1; _reason="owner-dead"
+		fi
+	fi
+	printf '%s%s%s%s%s%s%s%s%s%s%s\n' \
+		"$_br" "$REC_SEP" "$_wt" "$REC_SEP" "$_port" "$REC_SEP" \
+		"$_changes" "$REC_SEP" "$_stale" "$REC_SEP" "$_reason"
+}
+
+# collect_records: emit one record line per agent worktree of REPO_ROOT. Filters
+# `git worktree list --porcelain` to branches under the it2agent/ scheme. A
+# trailing blank line is appended so the final porcelain block always flushes.
+collect_records() {
+	{ git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null; printf '\n'; } | {
+		wt=""; br=""
+		while IFS= read -r line; do
+			case "$line" in
+				"worktree "*) wt="${line#worktree }" ;;
+				"branch refs/heads/"*) br="${line#branch refs/heads/}" ;;
+				"")
+					case "$br" in
+						it2agent/*) [ -n "$wt" ] && emit_record "$wt" "$br" ;;
+					esac
+					wt=""; br=""
+					;;
+			esac
+		done
+	}
+}
+
+# --- JSON formatting (pure, careful escaping; no python dependency) ----------
+json_escape() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+jstr() { printf '"%s"' "$(json_escape "$1")"; }
+jstrn() { if [ -z "$1" ]; then printf 'null'; else printf '"%s"' "$(json_escape "$1")"; fi; }
+jnum() { if [ -z "$1" ]; then printf 'null'; else printf '%s' "$1"; fi; }
+jbool() { if [ "$1" = "1" ]; then printf 'true'; else printf 'false'; fi; }
+
+render_json() {
+	printf '['
+	first=1
+	printf '%s\n' "$RECORDS" | while IFS="$REC_SEP" read -r br wt port changes stale reason; do
+		[ "$first" = "1" ] || printf ','
+		first=0
+		if [ -z "$changes" ]; then clean=null
+		elif [ "$changes" = "0" ]; then clean=true
+		else clean=false; fi
+		printf '{"branch":%s,"worktree":%s,"port":%s,"changes":%s,"clean":%s,"stale":%s,"stale_reason":%s}' \
+			"$(jstr "$br")" "$(jstr "$wt")" "$(jnum "$port")" "$(jnum "$changes")" \
+			"$clean" "$(jbool "$stale")" "$(jstrn "$reason")"
+	done
+	printf ']\n'
+}
+
+render_table() {
+	printf '%-42s  %-6s  %-13s  %-16s  %s\n' BRANCH PORT STATUS STALE WORKTREE
+	printf '%s\n' "$RECORDS" | while IFS="$REC_SEP" read -r br wt port changes stale reason; do
+		if [ "$reason" = "worktree-gone" ]; then st="gone"
+		elif [ -z "$changes" ]; then st="-"
+		elif [ "$changes" = "0" ]; then st="clean"
+		elif [ "$changes" = "1" ]; then st="1 change"
+		else st="$changes changes"; fi
+		smark="-"
+		[ "$stale" = "1" ] && smark="STALE ($reason)"
+		printf '%-42s  %-6s  %-13s  %-16s  %s\n' "$br" "${port:--}" "$st" "$smark" "$wt"
+	done
+}
+
+# cmd_report: the ls/status entry point. JSON=1 emits machine-readable JSON;
+# otherwise a human table. Read-only; never gates (like plan/env).
+cmd_report() {
+	compute_wt_root
+	RECORDS="$(collect_records)"
+	if [ -z "$RECORDS" ]; then
+		if [ "$JSON" = "1" ]; then
+			printf '[]\n'
+		else
+			warn "no agent (it2agent/…) worktrees for $REPO_ROOT"
+		fi
+		return 0
+	fi
+	if [ "$JSON" = "1" ]; then
+		render_json
+	else
+		render_table
+	fi
+}
+
 usage() {
 	cat <<EOF
 $PROG — per-agent git-worktree + \$IT2AGENT_PORT / \$IT2AGENT_NS isolation.
@@ -603,6 +745,13 @@ Commands:
              allocation on stdout. Idempotent; --dry-run prints the git plan.
   cleanup    Remove an agent's worktree + branch IF SAFE (gated): refuses a
              dirty working tree and an unmerged branch. --force overrides.
+  ls         List this repo's agent worktrees as a human table (read-only, no
+             gate): branch, leased port, git-status summary, STALE marker, and
+             worktree path. Composes git worktree list + .leases + git status;
+             allocates nothing and never deletes/reclaims.
+  status     Same data as \`ls\`; add --json for a machine-readable array (stable
+             keys: branch, worktree, port, changes, clean, stale, stale_reason)
+             for the janitor / daemon / MCP to consume.
   -h,--help  Show this help.
 
 Common options:
@@ -631,6 +780,10 @@ cleanup options:
   --dry-run          Print the git commands; execute nothing.
   --no-gate          Bypass the feature-flag gate (local testing).
 
+ls / status options:
+  --json             Emit a JSON array instead of a table (status default is a
+                     table too; --json switches either command to JSON).
+
 Environment:
   IT2AGENT_WORKTREE_ROOT   Override the parent dir for all worktrees.
   IT2AGENT_FORCE=1         Bypass the feature-flag gate (like --no-gate).
@@ -649,7 +802,7 @@ EOF
 CMD="$1"; shift
 case "$CMD" in
 	-h|--help|help) usage; exit 0 ;;
-	plan|env|create|cleanup) ;;
+	plan|env|create|cleanup|ls|status) ;;
 	*) die "unknown command: $CMD (try --help)" ;;
 esac
 
@@ -665,6 +818,7 @@ NO_PROBE=0
 FORCE=0
 BASE_REF=""
 LEASE_PID=0
+JSON=0
 
 [ "${IT2AGENT_FORCE:-}" = "1" ] && NO_GATE=1
 
@@ -687,6 +841,7 @@ while [ $# -gt 0 ]; do
 		--dry-run) DRYRUN=1; shift ;;
 		--no-gate) NO_GATE=1; shift ;;
 		--no-probe) NO_PROBE=1; shift ;;
+		--json) JSON=1; shift ;;
 		--lease-pid) [ $# -ge 2 ] || die "--lease-pid requires a value"; LEASE_PID="$2"; shift 2 ;;
 		--lease-pid=*) LEASE_PID="${1#--lease-pid=}"; shift ;;
 		--force) FORCE=1; shift ;;
@@ -708,6 +863,9 @@ case "$CMD" in
 		;;
 	env)
 		cmd_env
+		;;
+	ls|status)
+		cmd_report
 		;;
 	create)
 		if ! gate_open; then
