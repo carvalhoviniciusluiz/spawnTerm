@@ -30,6 +30,12 @@
   Epic #1). Follow `CLAUDE.md`; build (`tools/build.sh`) + `ModernTests` to verify.
 - **Non-goal:** do not build the durable queue/broker inside iTerm2 (wrong layer — that is Tier 2,
   an external process).
+- **Claude Code config convention (standing rule):** any config we need Claude Code to use (hooks,
+  env, MCP wiring) is **always** written to the **active project's** `<git-root>/.claude/settings.local.json`
+  (per-project, gitignored, machine-local — never the committed `.claude/settings.json`, never global
+  unless explicitly opted in), exposed as a **feature-flag** with safe install/uninstall where
+  "installed = enabled." Reuse the shared install mechanism; hooks are always exit-0 observers.
+  Full rationale + pattern: `it2agent/docs/claude-config-convention.md`.
 
 ## Labels
 `tier:0-escape-codes … tier:4-core` · `scope:external-tooling|iterm2-core` ·
