@@ -150,6 +150,8 @@ backed by the daemon + broker. Enable `agent.mcp` to start the server.
 | `send_message` | durable, ack'd message to another agent (broker `send`) |
 | `status` | read an agent's latest handoff (broker `handoff_get`) |
 | `list_agents` | list the registry, filter by role/alive/capability |
+| `team_tasks` | read a mirrored team's task lifecycle — `handoff_history` grouped by `task:` goal, per-task pending→completed (survives lead death) |
+| `read_messages` | non-destructive, offset-based inbox read — `poll` filtered to `id > since`, never acks (cursor intact) |
 | `help` | return this guide's text (also via `resources/read` + `initialize` instructions) |
 
 ## Team bridge — mirror Claude Code agent teams into the durable broker (`agent.team_bridge`)
@@ -157,9 +159,11 @@ backed by the daemon + broker. Enable `agent.mcp` to start the server.
 `it2agent-team-hook` is a durable OBSERVER of Claude Code's experimental agent
 teams. Registered as three hooks, it shadows team state into the broker so it
 survives lead-session death; the mirror is then visible through the MCP tools
-above (`list_agents` filtered by `capability:"team:session-<sid8>"`, `status`,
-`handoff_history`). It is an observer: it never steers the team and always exits
-0. The team key is derived from `session_id` as `team:session-<first 8 chars>`.
+above — `list_agents` filtered by `capability:"team:session-<sid8>"`, `status`,
+and (the read surface, #94) `team_tasks {team}` for the per-task lifecycle plus
+`read_messages {agent, since}` to drain the durable inbox non-destructively. It
+is an observer: it never steers the team and always exits 0. The team key is
+derived from `session_id` as `team:session-<first 8 chars>`.
 
 | Event | Broker op |
 | --- | --- |

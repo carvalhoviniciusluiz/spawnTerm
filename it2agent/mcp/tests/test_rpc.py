@@ -68,11 +68,12 @@ class TestToolsList(unittest.TestCase):
     def test_lists_tools_with_schemas(self):
         resp = rpc.handle_request(req("tools/list"), make_deps())
         tool_list = resp["result"]["tools"]
-        self.assertEqual(len(tool_list), 7)
+        self.assertEqual(len(tool_list), 9)
         names = [t["name"] for t in tool_list]
         self.assertEqual(
             names,
-            ["spawn", "assign", "handoff", "send_message", "status", "list_agents", "help"],
+            ["spawn", "assign", "handoff", "send_message", "status", "list_agents",
+             "team_tasks", "read_messages", "help"],
         )
         for t in tool_list:
             self.assertEqual(t["inputSchema"]["type"], "object")
@@ -215,7 +216,7 @@ class TestDispatchLine(unittest.TestCase):
     def test_roundtrip_tools_list_line(self):
         line = rpc.dispatch_line(json.dumps(req("tools/list")), make_deps())
         obj = json.loads(line)
-        self.assertEqual(len(obj["result"]["tools"]), 7)
+        self.assertEqual(len(obj["result"]["tools"]), 9)
 
 
 if __name__ == "__main__":

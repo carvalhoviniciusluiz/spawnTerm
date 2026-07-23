@@ -105,11 +105,21 @@ The hook is a thin CLI (`it2agent/broker/` client, stdlib only) that self-gates 
   replayed until acked, so a lead that died and resumed still sees it (`broker/mailbox.py:184`).
 
 ### Expose it back via MCP (reuse, do not add surface for v1)
-The mirror is already visible through the **existing** MCP tools (`mcp/tools.py`):
+The mirror is visible through the **existing** MCP tools (`mcp/tools.py`):
 - `list_agents` → broker `query` → the mirrored teammates (filter by `capability:"team:session-<sid8>"`).
 - `status {agent_id:"team:session-<sid8>", goal:"task:<id>"}` → broker `handoff_get` → latest task state.
-- A thin **new** tool `team_tasks {team}` (→ broker `handoff_history` filtered by goal-prefix `task:`)
-  is the only *optional* addition, and only if a raw history dump proves awkward through `status`.
+
+**Landed (#94):** two thin **read-only** tools formalize the read side as a
+separate read-model over the mirrored write side (durable-artifact-as-source-of-
+truth + CQRS-lite: the bridge writes, these only read; no new broker op):
+- `team_tasks {team}` → broker `handoff_history` for the team key, grouped by the
+  `task:` goal-prefix into each task's append-only pending→completed lifecycle.
+  Accepts a raw `session_id` or the derived `team:session-<sid8>` key.
+- `read_messages {agent, since}` → broker `poll` (non-destructive) + client-side
+  `id > since` filtering. It NEVER acks, so the ack cursor is untouched and a
+  later poll still replays everything — the **inbox pattern**: reading is
+  idempotent and does not prematurely consume (ack stays the explicit,
+  separate commit). Both are gated on `agent.mcp` like the other tools.
 
 ### Acceptance test
 1. `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, `agent.team_bridge` ON, broker running. Start a 2-teammate
@@ -271,9 +281,10 @@ Each major decision is validated against academic/industry sources. Verdict = **
 1. **Broker bridge under agent-teams (`it2agent-team-hook` + `agent.team_bridge` flag)** ·
    TeammateIdle/TaskCreated/TaskCompleted hook → broker `register`/`handoff_put`(+`send`), always exit 0,
    pure event→op mapping unit-tested · *dep: broker (shipped), flags (shipped)*. **The moat; do first.**
-2. **MCP read surface for the mirror (`team_tasks` and/or `read_messages {agent,since}`)** ·
-   expose `handoff_history` + the mailbox `poll since` offset so any agent drains durable team state /
-   its inbox · *dep: #1 for `team_tasks`; standalone for `read_messages`* (N1, N2, R2).
+2. **MCP read surface for the mirror (`team_tasks` and/or `read_messages {agent,since}`)** · **LANDED
+   (#94):** both tools ship, composed purely over the existing `handoff_history` + `poll` ops (no broker
+   change) — `team_tasks` groups the `task:` history per task; `read_messages` filters `id > since`
+   client-side and never acks · *dep: #1 for `team_tasks`; standalone for `read_messages`* (N1, N2, R2).
 3. **`send` idempotency key + dedup** · optional key on broker `send`; drop duplicate enqueues; keeps
    at-least-once sound under retries · *dep: broker* (R2).
 4. **Retire #28 standalone router; document broker-only messaging** · router remains only as the bridge's

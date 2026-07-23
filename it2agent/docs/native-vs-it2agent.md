@@ -83,10 +83,12 @@ Storage and durability (authoritative, `code.claude.com/docs/en/agent-teams`, v2
   `SetUserVar`/tab color (gate `agent.status_board`).
 - **Worktree + `$PORT`/`$NS` isolation** — `it2agent/spawn/it2agent-worktree` (#13): deterministic
   branch + worktree + `$IT2AGENT_PORT` + `$IT2AGENT_NS` per agent (header 12-38).
-- **MCP** — `it2agent/mcp/**` (#18): **7 tools** — `spawn`, `assign`, `handoff`, `send_message`,
-  `status`, `list_agents`, `help` (`it2agent/mcp/tools.py:404-560`). Each maps to a broker op or the
-  spawn plan; broker client is injected. Also exposes `AGENT_GUIDE.md` as a resource
-  (`it2agent/mcp/rpc.py:115-142`). (Note: the module docstring still says "six handlers" — stale, it's 7.)
+- **MCP** — `it2agent/mcp/**` (#18): **9 tools** — `spawn`, `assign`, `handoff`, `send_message`,
+  `status`, `list_agents`, `team_tasks`, `read_messages`, `help` (`it2agent/mcp/tools.py`). Each maps
+  to a broker op or the spawn plan; broker client is injected. `team_tasks`/`read_messages` (#94) are
+  the READ surface over the #92 team mirror — `handoff_history` grouped by `task:` goal, and a
+  non-destructive `poll` with an `id > since` offset. Also exposes `AGENT_GUIDE.md` as a resource
+  (`it2agent/mcp/rpc.py`).
 - **cost** (#16), **janitor** (#15), **review** (#14, request-changes routes *through the broker
   mailbox* — `it2agent/review/review_notify.py:1-24`), **tmux -CC** (#5), **inbox**, **flags** (#11).
 

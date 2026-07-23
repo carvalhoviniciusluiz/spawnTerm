@@ -11,7 +11,7 @@ unit test can feed it request dicts and assert the exact JSON-RPC replies.
 Implemented methods (the minimal correct subset an MCP client needs):
 
   * ``initialize``      → protocolVersion + capabilities.tools + serverInfo.
-  * ``tools/list``      → the six tool descriptors from :data:`tools.TOOLS`.
+  * ``tools/list``      → the nine tool descriptors from :data:`tools.TOOLS`.
   * ``tools/call``      → run a handler, wrap its result as an MCP tool result
                           (``content`` text block + ``structuredContent``;
                           ``isError`` reflects the handler's ``ok`` flag, or a
