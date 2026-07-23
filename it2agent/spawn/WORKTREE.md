@@ -164,6 +164,49 @@ local `main`/`master`, then the current branch) or given explicitly with
 When safe, cleanup runs `git worktree remove`, `git branch -d`, and
 `git worktree prune`.
 
+## Observability (`ls` / `status`)
+
+Two **read-only** reporters give an at-a-glance view of the repo's per-agent
+worktrees. They compose only data that already exists — `git worktree list
+--porcelain` (filtered to the `it2agent/<role>-<id>-<hash>` branch scheme), the
+`.leases/` dir, and per-worktree `git status --porcelain` — so they add **no new
+state**: they allocate no port, create no worktree, and never touch settings or
+leases. Like `plan`/`env`, they **never gate** and work whenever there are
+worktrees. Outside a git repo they error with a clear message (exit 2).
+
+```sh
+it2agent-worktree ls            --repo .          # human table
+it2agent-worktree status --json --repo .          # machine-readable array
+```
+
+`ls` prints a table — branch, leased port, a `git status` summary
+(`clean` / `N changes` / `gone`), a STALE marker, and the worktree path:
+
+```
+BRANCH                      PORT   STATUS      STALE                  WORKTREE
+it2agent/worker-13-d8763d   41724  2 changes   -                      /…/worker-13-d8763d
+it2agent/tech-lead-42-5f9c  41602  gone        STALE (worktree-gone)  /…/tech-lead-42-5f9c
+```
+
+`status --json` emits the same records as a JSON array (a small pure formatter
+with proper escaping — no `python` dependency), with stable keys for the janitor
+(#15), daemon (#3), and MCP surface to consume:
+
+```json
+[{"branch":"it2agent/worker-13-d8763d","worktree":"/…/worker-13-d8763d",
+  "port":41724,"changes":2,"clean":false,"stale":false,"stale_reason":null}]
+```
+
+`port` is `null` when a worktree holds no lease; `changes`/`clean` are `null`
+when the worktree dir is gone.
+
+**Stale, but only reported.** An entry is flagged STALE when its worktree
+directory no longer exists (`worktree-gone`) or its lease records a positive
+owner pid that is no longer alive (`owner-dead`) — the same reclaim rule the
+allocator applies in `lease_stale`. The reporters only **surface** this: they
+never delete a lease, remove a worktree, or prune anything. Reclaim still
+happens only during `create` (allocation) and `cleanup`, exactly as before.
+
 ## The feature flag
 
 Everything above gates on **`agent.worktree_isolation`** (seeded OFF in
@@ -192,7 +235,10 @@ bash it2agent/spawn/tests/test_spawn.sh      # spawn integration (gate on/off)
 `test_worktree.sh` covers the pure allocator (determinism, sanitization, port
 range + collision-avoidance), the gate-off no-op, `--dry-run` (asserts the git
 plan, no side effects), a **real** `git worktree add`/`remove` cycle in a
-throwaway tmp repo, and the cleanup safety refusals (dirty + unmerged). It is
-fast and non-flaky. `test_spawn.sh` additionally asserts that spawn with the
+throwaway tmp repo, the cleanup safety refusals (dirty + unmerged), and the
+read-only `ls`/`status --json` reporters (correct branch/port/status, valid
+JSON, and that a stale entry — removed worktree or dead-pid lease — is *marked*
+but never deleted or pruned). It is fast and non-flaky. `test_spawn.sh`
+additionally asserts that spawn with the
 gate OFF is byte-for-byte the #10 behavior, and that with the gate ON the tab
 `cd`s into the worktree and exports `$IT2AGENT_PORT` / `$IT2AGENT_NS`.

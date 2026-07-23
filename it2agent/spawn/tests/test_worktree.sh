@@ -254,6 +254,101 @@ sh "$WT" cleanup --repo "$REPO" --id lease_teardown --role worker --base main --
 unset IT2AGENT_NO_TCP_PROBE
 
 echo
+echo "--- 8. ls / status observability reporter (read-only) ---"
+# Two real agent worktrees + their leases (via the tool's own create, so this is
+# exactly what a spawn produces). Probing is on, so each gets a real leased port.
+cA="$(sh "$WT" create --repo "$REPO" --id obsA --role worker    --no-gate 2>/dev/null)"
+cB="$(sh "$WT" create --repo "$REPO" --id obsB --role tech-lead --no-gate 2>/dev/null)"
+brA="$(val branch "$cA")"; wtA="$(val worktree "$cA")"; portA="$(val port "$cA")"
+brB="$(val branch "$cB")"; wtB="$(val worktree "$cB")"; portB="$(val port "$cB")"
+# Make A dirty; leave B clean.
+printf 'scratch\n' > "$wtA/uncommitted.txt"
+
+# 8a. ls lists both with the right branch + leased port + status summary.
+tbl="$(sh "$WT" ls --repo "$REPO")"
+assert_contains "ls lists worktree A's branch"        "$brA"   "$tbl"
+assert_contains "ls lists worktree B's branch"        "$brB"   "$tbl"
+lineA="$(printf '%s\n' "$tbl" | grep -F "$brA")"
+lineB="$(printf '%s\n' "$tbl" | grep -F "$brB")"
+assert_contains "ls shows A's leased port"            "$portA" "$lineA"
+assert_contains "ls shows B's leased port"            "$portB" "$lineB"
+assert_contains "ls marks the dirty worktree A"       "change" "$lineA"
+assert_contains "ls marks the clean worktree B"       "clean"  "$lineB"
+
+# 8b. status --json is valid JSON with the same records (stable keys).
+js="$(sh "$WT" status --repo "$REPO" --json)"
+case "$js" in
+	\[*\]) green "status --json is a bracketed array" ;;
+	*)     red "status --json is not bracketed ($js)" ;;
+esac
+objA="$(printf '%s' "$js" | grep -oE '\{[^}]*\}' | grep -F "\"branch\":\"$brA\"")"
+objB="$(printf '%s' "$js" | grep -oE '\{[^}]*\}' | grep -F "\"branch\":\"$brB\"")"
+assert_contains "json A: worktree path"          "\"worktree\":\"$wtA\"" "$objA"
+assert_contains "json A: leased port (number)"   "\"port\":$portA"       "$objA"
+assert_contains "json A: dirty => clean:false"   "\"clean\":false"       "$objA"
+assert_contains "json A: not stale"              "\"stale\":false"       "$objA"
+assert_contains "json B: clean => clean:true"    "\"clean\":true"        "$objB"
+# Strict parse when a JSON parser is on the box (python3 or, on macOS, plutil).
+if command -v python3 >/dev/null 2>&1; then
+	if printf '%s' "$js" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+		green "status --json parses as valid JSON (python3)"
+	else
+		red "status --json does not parse as valid JSON (python3)"
+	fi
+elif command -v plutil >/dev/null 2>&1; then
+	printf '%s' "$js" > "$TMP/status.json"
+	if plutil -lint "$TMP/status.json" >/dev/null 2>&1; then
+		green "status --json parses as valid JSON (plutil)"
+	else
+		red "status --json does not parse as valid JSON (plutil)"
+	fi
+else
+	green "no JSON parser available; skipped strict parse (structural checks passed)"
+fi
+
+# 8c. STALE by dead owner pid -> marked, but NOT deleted/reclaimed (report only).
+( : ) & deadpid=$!; wait "$deadpid" 2>/dev/null || true
+lfB="$(grep -lF "worktree=$wtB" "$TMP/wt/.leases"/*.lease | head -1)"
+sed "s/^pid=.*/pid=$deadpid/" "$lfB" > "$lfB.tmp" && mv "$lfB.tmp" "$lfB"
+tbl2="$(sh "$WT" ls --repo "$REPO")"
+lineB2="$(printf '%s\n' "$tbl2" | grep -F "$brB")"
+assert_contains "dead-pid lease shows a STALE marker"    "STALE"      "$lineB2"
+assert_contains "stale reason is owner-dead"             "owner-dead" "$lineB2"
+[ -f "$lfB" ] && green "reporter did NOT delete the stale lease" || red "stale lease was deleted (reporter must not mutate)"
+[ -d "$wtB" ] && green "reporter did NOT remove the stale worktree" || red "stale worktree was removed"
+git -C "$REPO" show-ref --verify --quiet "refs/heads/$brB" && green "stale entry's branch left intact" || red "stale entry's branch was deleted"
+
+# 8d. STALE by removed worktree dir -> marked gone, but NOT pruned (report only).
+rm -rf "$wtA"
+tbl3="$(sh "$WT" ls --repo "$REPO")"
+lineA3="$(printf '%s\n' "$tbl3" | grep -F "$brA")"
+assert_contains "removed worktree dir shows a STALE marker" "STALE"         "$lineA3"
+assert_contains "stale reason is worktree-gone"             "worktree-gone" "$lineA3"
+if git -C "$REPO" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $wtA"; then
+	green "reporter did NOT prune the gone worktree registration"
+else
+	red "reporter pruned a worktree (must be read-only)"
+fi
+js3="$(sh "$WT" status --repo "$REPO" --json)"
+objA3="$(printf '%s' "$js3" | grep -oE '\{[^}]*\}' | grep -F "\"branch\":\"$brA\"")"
+assert_contains "json: gone worktree => stale:true"   "\"stale\":true"     "$objA3"
+assert_contains "json: gone worktree => changes:null" "\"changes\":null"   "$objA3"
+
+# 8e. an empty repo (no agent worktrees) reports [] / a clear note, not an error.
+EMPTY="$TMP/emptyrepo"
+mkdir -p "$EMPTY"
+git -C "$EMPTY" init -q
+git -C "$EMPTY" config user.email t@example.com
+git -C "$EMPTY" config user.name test
+printf 'x\n' > "$EMPTY/f"; git -C "$EMPTY" add f; git -C "$EMPTY" commit -qm init
+assert_eq "empty repo: status --json is []" "[]" "$(sh "$WT" status --repo "$EMPTY" --json)"
+assert_exit "empty repo: ls still exits 0" 0 sh "$WT" ls --repo "$EMPTY"
+
+# 8f. outside a git repo -> clear error, nonzero exit (read-only reporters too).
+assert_exit "ls outside a git repo exits 2"     2 sh "$WT" ls     --repo "$TMP"
+assert_exit "status outside a git repo exits 2" 2 sh "$WT" status --repo "$TMP" --json
+
+echo
 echo "--- 6. exit codes / usage ---"
 assert_exit "--help exits 0"                 0 sh "$WT" --help
 assert_exit "missing command exits 2"        2 sh "$WT"

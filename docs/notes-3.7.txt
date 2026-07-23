@@ -99,6 +99,17 @@ Major New Features:
   (dead owner or missing worktree) are
   reclaimed, and cleanup releases them.
 
+- The it2agent-worktree helper gained two
+  read-only reporters. “ls” prints a table of
+  the repo's per-agent worktrees: branch,
+  leased port, a git-status summary, and a
+  STALE marker for a worktree whose directory
+  is gone or whose lease owner has died.
+  “status --json” emits the same data as a
+  JSON array for tooling to consume. Both are
+  pure readers: they allocate nothing and only
+  report stale entries, never delete them.
+
 - A new agent capability, "Team Bridge",
   durably mirrors Claude Code agent-teams
   task and coordination state into the
