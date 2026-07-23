@@ -97,14 +97,19 @@ enum WorkgroupPresets {
             parentID: rootID,
             kind: .peer,
             profileGUID: nil,
-            command: "git difftool -y -x vimdiff \\(gitBase)",
+            // `git difftool -x <cmd>` invokes `<cmd> "$LOCAL" "$REMOTE"`. For
+            // deleted/added files git passes /dev/null as one side, and vimdiff
+            // refuses it ("/dev/null is not a file", blocking on Press ENTER).
+            // The inline sh wrapper swaps any /dev/null side for an empty temp
+            // file before exec'ing vimdiff; two real sides behave as before.
+            command: "git difftool -y -x 'sh -c '\\''l=\"$1\"; r=\"$2\"; [ \"$l\" = /dev/null ] && l=\"$(mktemp)\"; [ \"$r\" = /dev/null ] && r=\"$(mktemp)\"; exec vimdiff \"$l\" \"$r\"'\\'' sh' \\(gitBase)",
             urlString: "",
             toolbarItems: [.modeSwitcher,
                            .changedFileSelector,
                            .gitBaseSelector,
                            .navigation(WorkgroupNavigationShortcuts.defaults)],
             displayName: "Diff",
-            perFileCommand: "git difftool -y -x vimdiff \\(gitBase) -- \\(file)",
+            perFileCommand: "git difftool -y -x 'sh -c '\\''l=\"$1\"; r=\"$2\"; [ \"$l\" = /dev/null ] && l=\"$(mktemp)\"; [ \"$r\" = /dev/null ] && r=\"$(mktemp)\"; exec vimdiff \"$l\" \"$r\"'\\'' sh' \\(gitBase) -- \\(file)",
             mode: .diff)
 
         let review = iTermWorkgroupSessionConfig(
