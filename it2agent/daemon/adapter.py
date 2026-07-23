@@ -43,6 +43,27 @@ CUSTOM_SEQUENCE_IDENTITY = "it2agent"
 CUSTOM_SEQUENCE_REGEX = r"(.*)"
 
 
+def build_spawn_customizations(plan):
+    """Build the write-only profile customization for a spawned agent tab (#27).
+
+    When ``plan.cwd`` is set, the new session must open in that directory. A
+    :class:`iterm2.LocalWriteOnlyProfile` has no ``set_working_directory``; the
+    correct API is ``set_custom_directory`` (records the path) paired with
+    ``set_initial_directory_mode(..._CUSTOM)`` (makes the new session actually
+    open there). iterm2 is imported lazily so the module stays import-clean
+    without a running iTerm2 (see the purity test).
+    """
+    import iterm2  # lazy: keep the top-level import iterm2-free.
+
+    customizations = iterm2.LocalWriteOnlyProfile()
+    if plan.cwd:
+        customizations.set_custom_directory(plan.cwd)
+        customizations.set_initial_directory_mode(
+            iterm2.InitialWorkingDirectory.INITIAL_WORKING_DIRECTORY_CUSTOM
+        )
+    return customizations
+
+
 class DaemonAdapter:
     """Bridges iTerm2 monitors to the pure registry. Owns no logic of its own
     beyond translation and logging."""
@@ -346,9 +367,7 @@ class DaemonAdapter:
         import iterm2  # lazy: keep the top-level import iterm2-free.
 
         app = await iterm2.async_get_app(self.connection)
-        customizations = iterm2.LocalWriteOnlyProfile()
-        if plan.cwd:
-            customizations.set_working_directory(plan.cwd)
+        customizations = build_spawn_customizations(plan)
 
         window = app.current_terminal_window
         if window is None:
