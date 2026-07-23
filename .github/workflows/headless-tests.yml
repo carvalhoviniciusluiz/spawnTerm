@@ -1,0 +1,56 @@
+# Headless it2agent test suites (issue #128, part of #1).
+#
+# Runs the PURE layer of the it2agent tools on every push/PR to master: all
+# `test_*.py` (unittest) and `test_*.sh` suites under it2agent/**/tests/, plus
+# `live_smoke.py --only ccstatus` (the one live surface that needs no iTerm2 —
+# exact OSC 21337 bytes). The single source of truth for the suite list is
+# it2agent/tests/run_headless.sh, which discovers the suites dynamically; this
+# workflow just calls it.
+#
+# What is intentionally NOT here: the LIVE layer. The full gate
+# `python3 it2agent/tests/live_smoke.py --json` (spawn / tmux / mcp surfaces) and
+# the *_live.sh suites need a real iTerm2 3.7.dev with the Python API on and a
+# GUI session. Hosted GitHub runners have none of that, so those run only on a
+# self-hosted macOS runner or by hand on the Mac (see run_headless.sh header).
+# We do NOT fake the live layer in hosted CI.
+#
+# Hermeticity: this job never runs `it2agent install` (that would drop
+# ~/.local/bin flag wrappers and break the "flag OFF/absent -> gated off" cases),
+# and the runner isolates the flag config so flags read OFF by default — matching
+# a fresh host. This runs alongside the existing test.yml (Python-API lib +
+# Xcode) without touching or duplicating it.
+
+name: Headless Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  headless:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Show environment
+        run: |
+          python3 --version
+          bash --version | head -1
+          # Confirm PATH is clean: no it2agent-flag wrapper (we never install).
+          if command -v it2agent-flag >/dev/null 2>&1; then
+            echo "::warning::it2agent-flag unexpectedly on PATH; gate tests may leak"
+          else
+            echo "it2agent-flag absent from PATH (expected)"
+          fi
+
+      - name: Run headless test suites
+        run: bash it2agent/tests/run_headless.sh
