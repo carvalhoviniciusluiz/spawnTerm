@@ -45,7 +45,9 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                          @"codex_status",
                          @"native_status",
                          @"team_bridge",
-                         @"canonical_port" ];
+                         @"canonical_port",
+                         @"isolate_docker",
+                         @"isolate_db" ];
     });
     return identifiers;
 }
@@ -82,7 +84,9 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                    @"codex_status": @"Codex Tab Status",
                    @"native_status": @"Native Tab Status",
                    @"team_bridge": @"Team Bridge",
-                   @"canonical_port": @"Canonical Port" };
+                   @"canonical_port": @"Canonical Port",
+                   @"isolate_docker": @"Docker Isolation",
+                   @"isolate_db": @"DB Isolation" };
     });
     NSString *name = names[capability];
     if (name) {
@@ -115,7 +119,9 @@ static NSString *const iTermAgentTeamHookEnvironmentVariable = @"IT2AGENT_TEAM_H
                           @"codex_status": @"Shows Codex CLI working/idle activity in the tab status.",
                           @"native_status": @"Publishes agent state to iTerm2’s native tab status and Cockpit via OSC 21337.",
                           @"team_bridge": @"Mirrors Claude Code agent-teams state into the durable broker so it survives the lead session’s death.",
-                          @"canonical_port": @"The focused agent also answers on the normal localhost port (e.g. 3000), not just its dynamic one." };
+                          @"canonical_port": @"The focused agent also answers on the normal localhost port (e.g. 3000), not just its dynamic one.",
+                          @"isolate_docker": @"Sets COMPOSE_PROJECT_NAME per agent so Docker Compose stacks don’t collide.",
+                          @"isolate_db": @"Exports a per-agent Postgres schema/search_path so agents don’t share DB state." };
     });
     NSString *description = descriptions[capability];
     return description ?: @"";

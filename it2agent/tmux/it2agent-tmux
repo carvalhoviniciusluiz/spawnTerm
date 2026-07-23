@@ -112,6 +112,13 @@ spawn — start (or reattach) a named tmux -CC session and run the agent in it.
     --base-port <n>  Base of the per-agent port range (default 41000).
     --ports <a,b,c>  One dynamic port per name, exported as IT2AGENT_PORT_<UPPER>
                      (first is also the bare IT2AGENT_PORT). Without it: one port.
+    --isolate <list> Opt-in, ENV-ONLY service isolation (comma list): "docker"
+                     exports COMPOSE_PROJECT_NAME=\$IT2AGENT_NS (flag
+                     agent.isolate_docker); "db"/"db=schema" exports
+                     IT2AGENT_DB_SCHEMA + PGOPTIONS search_path, "db=database"
+                     exports IT2AGENT_DB_NAME (flag agent.isolate_db);
+                     "namespace" is rejected on macOS. Emits nothing unless the
+                     mode's flag is ON. Never runs docker or connects to Postgres.
     --canonical-port <base>
                      Canonical (project-normal) port base handed to the holder
                      when "agent.canonical_port" is ON (default 3000).
@@ -324,6 +331,7 @@ delegate_to_spawn() {
 	[ "$CANONICAL_TAKEOVER" = "1" ] && set -- --canonical-takeover "$@"
 	[ -n "$CANONICAL_PORT" ] && set -- --canonical-port "$CANONICAL_PORT" "$@"
 	[ -n "$PORTS" ]        && set -- --ports "$PORTS" "$@"
+	[ -n "$ISOLATE" ]      && set -- --isolate "$ISOLATE" "$@"
 	[ -n "$BASE_PORT" ]    && set -- --base-port "$BASE_PORT" "$@"
 	[ -n "$AGENT_ID" ]     && set -- --id "$AGENT_ID" "$@"
 	set -- --status "$STATUS" "$@"
@@ -380,6 +388,7 @@ run_tmux_path() {
 		[ -n "$TASK" ] && set -- "$@" --task "$TASK"
 		[ -n "$BASE_PORT" ] && set -- "$@" --base-port "$BASE_PORT"
 		[ -n "$PORTS" ] && set -- "$@" --ports "$PORTS"
+		[ -n "$ISOLATE" ] && set -- "$@" --isolate "$ISOLATE"
 		[ -n "$CANONICAL_PORT" ] && set -- "$@" --canonical-port "$CANONICAL_PORT"
 		[ "$CANONICAL_TAKEOVER" = "1" ] && set -- "$@" --canonical-takeover
 		[ "$NO_PROBE" = "1" ] && set -- "$@" --no-probe
@@ -391,10 +400,12 @@ run_tmux_path() {
 		ISO_NS="$(iso_val namespace)"; ISO_BRANCH="$(iso_val branch)"
 		[ -n "$ISO_WORKTREE" ] || die "it2agent-worktree did not return a worktree path"
 		CWD="$ISO_WORKTREE"
-		# NAMED (--ports) + CANONICAL exports the helper emitted, `;`-joined for the
-		# inner tmux script. Each `port_<name>=` / `canonical_port_<name>=` plan line
-		# becomes IT2AGENT_PORT_<UPPER> / IT2AGENT_CANONICAL_PORT_<UPPER>. Empty
-		# without --ports (= #13).
+		# NAMED (--ports) + CANONICAL + service-isolation (--isolate) exports the
+		# helper emitted, `;`-joined for the inner tmux script. Each `port_<name>=` /
+		# `canonical_port_<name>=` line becomes IT2AGENT_PORT_<UPPER> /
+		# IT2AGENT_CANONICAL_PORT_<UPPER>; each already-named `env_<NAME>=` line
+		# (env_COMPOSE_PROJECT_NAME, env_IT2AGENT_DB_SCHEMA, env_PGOPTIONS, …) becomes
+		# a plain `export <NAME>=`. Empty without --ports/--isolate (= #13).
 		iso_extra_exports() {
 			printf '%s\n' "$ISOLATION_PLAN" | while IFS= read -r line; do
 				case "$line" in
@@ -404,6 +415,9 @@ run_tmux_path() {
 					canonical_port_*=*)
 						nm="${line%%=*}"; nm="${nm#canonical_port_}"; v="${line#*=}"
 						printf 'export IT2AGENT_CANONICAL_PORT_%s=%s ; ' "$(printf '%s' "$nm" | tr '[:lower:]' '[:upper:]')" "$(shq "$v")" ;;
+					env_*=*)
+						nm="${line%%=*}"; nm="${nm#env_}"; v="${line#*=}"
+						printf 'export %s=%s ; ' "$nm" "$(shq "$v")" ;;
 				esac
 			done
 		}
@@ -510,7 +524,7 @@ run_tmux_path() {
 dispatch_spawn() {
 	DIR=""; USE_HOME=0; ROLE=""; TASK=""; STATUS="busy"
 	SESSION=""; AGENT_ID=""; BASE_PORT=""; NO_PROBE=0; NO_GATE=0; FORCE_ISOLATION=0
-	PORTS=""; CANONICAL_PORT=""; CANONICAL_TAKEOVER=0
+	PORTS=""; ISOLATE=""; CANONICAL_PORT=""; CANONICAL_TAKEOVER=0
 	DRYRUN="${IT2AGENT_TMUX_DRYRUN:-0}"; [ "$DRYRUN" = "1" ] || DRYRUN=0
 	# IT2AGENT_FORCE=1 opens the tmux gate (and forwards to emit); it does NOT turn
 	# on worktree isolation (P2 fix, #75). Isolation is opt-in via its own flag or
@@ -536,6 +550,8 @@ dispatch_spawn() {
 			--base-port=*) BASE_PORT="${1#--base-port=}"; shift ;;
 			--ports) [ $# -ge 2 ] || die "--ports requires a comma-separated list"; PORTS="$2"; shift 2 ;;
 			--ports=*) PORTS="${1#--ports=}"; shift ;;
+			--isolate) [ $# -ge 2 ] || die "--isolate requires a list (docker, db, db=schema, db=database)"; ISOLATE="${ISOLATE:+$ISOLATE,}$2"; shift 2 ;;
+			--isolate=*) ISOLATE="${ISOLATE:+$ISOLATE,}${1#--isolate=}"; shift ;;
 			--canonical-port) [ $# -ge 2 ] || die "--canonical-port requires a value"; CANONICAL_PORT="$2"; shift 2 ;;
 			--canonical-port=*) CANONICAL_PORT="${1#--canonical-port=}"; shift ;;
 			--canonical-takeover) CANONICAL_TAKEOVER=1; shift ;;

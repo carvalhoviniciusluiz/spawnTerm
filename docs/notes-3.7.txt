@@ -2314,3 +2314,17 @@ Bug Fixes:
   default; enable “Persist user-defined
   variables to a per-session sidecar file” in
   Advanced Settings.
+- it2agent worktree isolation gains two opt-in,
+  default-off service-isolation modes via
+  it2agent-worktree --isolate. “docker” exports
+  COMPOSE_PROJECT_NAME per agent so Docker
+  Compose stacks don’t collide; “db” exports a
+  per-agent Postgres schema/search_path (or a
+  database name with db=database) so agents
+  don’t share DB state. Both only export
+  environment variables the project’s own
+  compose/DB tooling reads — nothing runs
+  docker or connects to Postgres — and each is
+  gated by its own capability (Docker Isolation
+  / DB Isolation). “namespace” is rejected on
+  macOS with a pointer to docker.

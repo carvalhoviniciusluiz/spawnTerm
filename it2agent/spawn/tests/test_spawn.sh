@@ -163,6 +163,26 @@ assert_contains "ports: still exports the bare IT2AGENT_PORT (back-compat)" "exp
 assert_contains "canonical: previews IT2AGENT_CANONICAL_PORT_WEB" "export IT2AGENT_CANONICAL_PORT_WEB=" "$mp_on"
 
 echo
+echo "--- 6b3. service-isolation passthrough (--isolate, #111) ---"
+# --isolate flows through to the worktree helper, which (with --force-isolation
+# forwarding --no-gate to bypass the per-mode gates) emits the ENV-ONLY exports
+# the wrapper injects into the new session BEFORE the command. docker -> a plain
+# COMPOSE_PROJECT_NAME export; db -> IT2AGENT_DB_SCHEMA + PGOPTIONS; combined -> both.
+iso_svc="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --task iso --isolate docker,db --force-isolation --dry-run -- claude)"
+assert_contains "isolate docker: exports COMPOSE_PROJECT_NAME" "export COMPOSE_PROJECT_NAME=" "$iso_svc"
+assert_contains "isolate db: exports IT2AGENT_DB_SCHEMA"       "export IT2AGENT_DB_SCHEMA="   "$iso_svc"
+assert_contains "isolate db: exports PGOPTIONS search_path"    "export PGOPTIONS="            "$iso_svc"
+# db=database mode swaps the schema exports for a DB name.
+iso_dbd="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --task iso --isolate db=database --force-isolation --dry-run -- claude)"
+assert_contains "isolate db=database: exports IT2AGENT_DB_NAME" "export IT2AGENT_DB_NAME=" "$iso_dbd"
+# Without --isolate the plan has no service-isolation exports (byte-compat #13/#109).
+iso_none="$(cd "$SPAWN_DIR" && sh "$SPAWN" --id 13 --role worker --task iso --force-isolation --dry-run -- claude)"
+case "$iso_none" in
+	*COMPOSE_PROJECT_NAME*|*IT2AGENT_DB_*) red "no --isolate leaked a service-isolation export" ;;
+	*)                                     green "no --isolate: no service-isolation exports" ;;
+esac
+
+echo
 echo "--- 6c. capability-guide header (#56) ---"
 # By default the new session gets a 1-line pointer to the guide (it2agent help),
 # both flagged in the plan and present in the session commands.

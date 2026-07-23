@@ -434,6 +434,84 @@ unset IT2AGENT_CONFIG
 unset IT2AGENT_NO_TCP_PROBE
 
 echo
+echo "--- 11. service isolation (--isolate docker|db, items 5+6; ENV-ONLY) ---"
+# Fresh repo + config we control. worktree_isolation ON so create runs; the two
+# isolate flags toggled independently. NO --no-gate here (that would bypass the
+# per-mode gates), so this genuinely exercises each self-gate. NS is derived
+# purely, so assertions compare against the plan's namespace.
+ISOREPO="$TMP/isorepo"
+mkdir -p "$ISOREPO"
+git -C "$ISOREPO" init -q
+git -C "$ISOREPO" symbolic-ref HEAD refs/heads/main
+git -C "$ISOREPO" config user.email t@example.com
+git -C "$ISOREPO" config user.name test
+printf 'x\n' > "$ISOREPO/f"; git -C "$ISOREPO" add f; git -C "$ISOREPO" commit -qm init
+export IT2AGENT_WORKTREE_ROOT="$TMP/isowt"
+export IT2AGENT_NO_TCP_PROBE=1
+ISOCFG="$TMP/isocfg.toml"
+export IT2AGENT_CONFIG="$ISOCFG"
+FLAGBIN="$SPAWN_DIR/../flags/it2agent-flag"
+"$FLAGBIN" enable agent.worktree_isolation >/dev/null 2>&1
+iso_ns() { val namespace "$(sh "$WT" plan --repo "$ISOREPO" --id "$1" --role worker)"; }
+
+# 11a. namespace mode is rejected on macOS with a clear pointer to docker.
+ns_err="$(sh "$WT" plan --repo "$ISOREPO" --id ns1 --role worker --isolate namespace 2>&1)"
+assert_contains "--isolate namespace is rejected" "not supported on macOS" "$ns_err"
+assert_contains "--isolate namespace points at docker" "use --isolate docker" "$ns_err"
+assert_exit "--isolate namespace exits nonzero" 2 sh "$WT" plan --repo "$ISOREPO" --id ns1 --role worker --isolate namespace
+
+# 11b. both flags OFF -> --isolate docker,db exports NOTHING (fail-safe).
+off_iso="$(sh "$WT" create --repo "$ISOREPO" --id iso_off --role worker --isolate docker,db 2>/dev/null)"
+assert_not_contains "flags OFF: no COMPOSE_PROJECT_NAME" "COMPOSE_PROJECT_NAME" "$off_iso"
+assert_not_contains "flags OFF: no IT2AGENT_DB_SCHEMA"   "IT2AGENT_DB_SCHEMA"   "$off_iso"
+assert_not_contains "flags OFF: no isolate summary line" "isolate="            "$off_iso"
+
+# 11c. isolate_docker ON + --isolate docker -> COMPOSE_PROJECT_NAME=NS, nothing else.
+"$FLAGBIN" enable agent.isolate_docker >/dev/null 2>&1
+ns_dk="$(iso_ns iso_dk)"
+dk="$(sh "$WT" create --repo "$ISOREPO" --id iso_dk --role worker --isolate docker 2>/dev/null)"
+assert_contains "docker ON: exports COMPOSE_PROJECT_NAME=NS" "env_COMPOSE_PROJECT_NAME=$ns_dk" "$dk"
+assert_not_contains "docker-only: no DB schema export" "IT2AGENT_DB_SCHEMA" "$dk"
+assert_contains "docker: isolate summary lists docker" "isolate=docker" "$dk"
+
+# 11d. isolate_db ON + --isolate db (schema mode default) -> DB_SCHEMA + PGOPTIONS.
+"$FLAGBIN" enable agent.isolate_db >/dev/null 2>&1
+ns_db="$(iso_ns iso_db)"
+db="$(sh "$WT" create --repo "$ISOREPO" --id iso_db --role worker --isolate db 2>/dev/null)"
+assert_contains "db ON: exports IT2AGENT_DB_SCHEMA=NS" "env_IT2AGENT_DB_SCHEMA=$ns_db" "$db"
+assert_contains "db ON: exports PGOPTIONS search_path" "env_PGOPTIONS=-c search_path=$ns_db" "$db"
+assert_not_contains "db schema mode: no IT2AGENT_DB_NAME" "IT2AGENT_DB_NAME" "$db"
+
+# 11e. --isolate db=database -> IT2AGENT_DB_NAME instead of schema/PGOPTIONS.
+ns_dbd="$(iso_ns iso_dbd)"
+dbd="$(sh "$WT" create --repo "$ISOREPO" --id iso_dbd --role worker --isolate db=database 2>/dev/null)"
+assert_contains "db=database: exports IT2AGENT_DB_NAME=NS" "env_IT2AGENT_DB_NAME=$ns_dbd" "$dbd"
+assert_not_contains "db=database: no IT2AGENT_DB_SCHEMA" "IT2AGENT_DB_SCHEMA" "$dbd"
+assert_not_contains "db=database: no PGOPTIONS"          "PGOPTIONS"          "$dbd"
+
+# 11f. --isolate docker,db combines both (both flags ON).
+ns_both="$(iso_ns iso_both)"
+both="$(sh "$WT" create --repo "$ISOREPO" --id iso_both --role worker --isolate docker,db 2>/dev/null)"
+assert_contains "combined: COMPOSE_PROJECT_NAME present" "env_COMPOSE_PROJECT_NAME=$ns_both" "$both"
+assert_contains "combined: IT2AGENT_DB_SCHEMA present"   "env_IT2AGENT_DB_SCHEMA=$ns_both"   "$both"
+assert_contains "combined: isolate summary lists both"  "isolate=docker,db=schema"           "$both"
+
+# 11g. per-mode gate: docker ON but db OFF -> only COMPOSE_PROJECT_NAME.
+"$FLAGBIN" disable agent.isolate_db >/dev/null 2>&1
+mix="$(sh "$WT" create --repo "$ISOREPO" --id iso_mix --role worker --isolate docker,db 2>/dev/null)"
+assert_contains "mixed gate: docker export present"   "env_COMPOSE_PROJECT_NAME=" "$mix"
+assert_not_contains "mixed gate: db export suppressed" "IT2AGENT_DB_SCHEMA"       "$mix"
+
+# 11h. no --isolate -> no env_/isolate lines (byte-compat with #13/#109).
+"$FLAGBIN" enable agent.isolate_db >/dev/null 2>&1
+plain_iso="$(sh "$WT" create --repo "$ISOREPO" --id iso_plain --role worker 2>/dev/null)"
+assert_not_contains "no --isolate: no env_ export lines" "env_" "$plain_iso"
+assert_not_contains "no --isolate: no isolate summary"   "isolate=" "$plain_iso"
+
+unset IT2AGENT_CONFIG
+unset IT2AGENT_NO_TCP_PROBE
+
+echo
 echo "--- 6. exit codes / usage ---"
 assert_exit "--help exits 0"                 0 sh "$WT" --help
 assert_exit "missing command exits 2"        2 sh "$WT"

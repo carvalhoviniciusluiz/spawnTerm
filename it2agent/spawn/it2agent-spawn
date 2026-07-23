@@ -131,6 +131,14 @@ Worktree + port/namespace isolation (issue #13 — gated OFF by default):
   --ports <a,b,c>  Allocate one dynamic port per name, exported as
                    IT2AGENT_PORT_<UPPER> (first is also the bare IT2AGENT_PORT).
                    Without it there is exactly one port, as in #13.
+  --isolate <list> Opt-in, ENV-ONLY service isolation (comma list). "docker"
+                   exports COMPOSE_PROJECT_NAME=\$IT2AGENT_NS (flag
+                   agent.isolate_docker); "db"/"db=schema" exports
+                   IT2AGENT_DB_SCHEMA + PGOPTIONS search_path, "db=database"
+                   exports IT2AGENT_DB_NAME (flag agent.isolate_db). "namespace"
+                   is rejected on macOS. Each mode emits nothing unless its own
+                   flag is ON. We only export names the project's compose/DB
+                   tooling reads — we never run docker or connect to Postgres.
   --canonical-port <base>
                    Base for the canonical (project-normal) port handed to the
                    holder when the "agent.canonical_port" flag is ON (default 3000).
@@ -190,6 +198,7 @@ STATUS="busy"
 AGENT_ID=""
 BASE_PORT=""
 PORTS=""            # --ports web,db,cache (empty => single port, = #13)
+ISOLATE=""          # --isolate docker,db (empty => no service isolation)
 CANONICAL_PORT=""   # --canonical-port <base> (passthrough to the helper)
 CANONICAL_TAKEOVER=0
 NO_PROBE=0
@@ -249,6 +258,11 @@ while [ $# -gt 0 ]; do
 			PORTS="$2"; shift 2 ;;
 		--ports=*)
 			PORTS="${1#--ports=}"; shift ;;
+		--isolate)
+			[ $# -ge 2 ] || die "--isolate requires a list (docker, db, db=schema, db=database)"
+			ISOLATE="${ISOLATE:+$ISOLATE,}$2"; shift 2 ;;
+		--isolate=*)
+			ISOLATE="${ISOLATE:+$ISOLATE,}${1#--isolate=}"; shift ;;
 		--canonical-port)
 			[ $# -ge 2 ] || die "--canonical-port requires a value"
 			CANONICAL_PORT="$2"; shift 2 ;;
@@ -386,6 +400,7 @@ if iso_gate_open; then
 	[ -n "$TASK" ] && set -- "$@" --task "$TASK"
 	[ -n "$BASE_PORT" ] && set -- "$@" --base-port "$BASE_PORT"
 	[ -n "$PORTS" ] && set -- "$@" --ports "$PORTS"
+	[ -n "$ISOLATE" ] && set -- "$@" --isolate "$ISOLATE"
 	[ -n "$CANONICAL_PORT" ] && set -- "$@" --canonical-port "$CANONICAL_PORT"
 	[ "$CANONICAL_TAKEOVER" = "1" ] && set -- "$@" --canonical-takeover
 	[ "$NO_PROBE" = "1" ] && set -- "$@" --no-probe
@@ -407,10 +422,13 @@ if iso_gate_open; then
 	# The worktree becomes the working directory (replacing plain cwd inheritance).
 	CWD="$ISO_WORKTREE"
 
-	# Any NAMED port (--ports) and CANONICAL port the helper emitted become
-	# additional exports. We blindly turn each `port_<name>=` / `canonical_port_<name>=`
-	# plan line into IT2AGENT_PORT_<UPPER> / IT2AGENT_CANONICAL_PORT_<UPPER>. When
-	# --ports was not given there are none, so this is empty (= #13).
+	# Any NAMED port (--ports), CANONICAL port, and service-isolation (--isolate)
+	# export the helper emitted become additional exports. We blindly turn each
+	# `port_<name>=` / `canonical_port_<name>=` plan line into
+	# IT2AGENT_PORT_<UPPER> / IT2AGENT_CANONICAL_PORT_<UPPER>, and each already-named
+	# `env_<NAME>=` line (e.g. env_COMPOSE_PROJECT_NAME, env_IT2AGENT_DB_SCHEMA,
+	# env_PGOPTIONS) into a plain `export <NAME>=`. When neither --ports nor
+	# --isolate was given (with its flag ON) there are none, so this is empty (= #13).
 	iso_extra_exports() {
 		printf '%s\n' "$ISOLATION_PLAN" | while IFS= read -r line; do
 			case "$line" in
@@ -420,6 +438,9 @@ if iso_gate_open; then
 				canonical_port_*=*)
 					nm="${line%%=*}"; nm="${nm#canonical_port_}"; v="${line#*=}"
 					printf 'export IT2AGENT_CANONICAL_PORT_%s=%s\n' "$(printf '%s' "$nm" | tr '[:lower:]' '[:upper:]')" "$(shq "$v")" ;;
+				env_*=*)
+					nm="${line%%=*}"; nm="${nm#env_}"; v="${line#*=}"
+					printf 'export %s=%s\n' "$nm" "$(shq "$v")" ;;
 			esac
 		done
 	}
