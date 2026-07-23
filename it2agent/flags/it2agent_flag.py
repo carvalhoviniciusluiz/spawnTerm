@@ -46,6 +46,7 @@ KNOWN_FLAGS: dict[str, str] = {
     "menubar": "Menu bar status item showing a live count badge of busy AI agents (imported from gnachman/iTerm2#670).",
     "codex_status": "Show Codex CLI working/idle activity in the tab status by decoding the braille-spinner title prefix (imported from gnachman/iTerm2#673).",
     "native_status": "Emit native OSC 21337 tab-status so agents show in iTerm2's native tab status + Cockpit (it2agent-emit ccstatus).",
+    "team_bridge": "Mirror Claude Code agent-teams task/coordination state into the durable broker so it survives lead-session death (it2agent-team-hook).",
 }
 
 

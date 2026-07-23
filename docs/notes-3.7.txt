@@ -72,6 +72,17 @@ Major New Features:
   from birth, stamped with the agent's status
   and role · task. Off by default.
 
+- A new agent capability, "Team Bridge",
+  durably mirrors Claude Code agent-teams
+  task and coordination state into the
+  it2agent broker so it survives lead-session
+  death. The it2agent-team-hook tool is a
+  passive observer (always exits 0, never
+  steers the team) registered as TaskCreated /
+  TaskCompleted / TeammateIdle hooks; run
+  "it2agent-team-hook install" to opt in. Off
+  by default.
+
 - The Companion app can now receive push
   notifications for terminal alerts. Turn on
   "Send alerts to paired iPhone" in a profile's
