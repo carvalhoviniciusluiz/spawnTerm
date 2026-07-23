@@ -333,6 +333,55 @@ project-local: mostra o caminho resolvido `<project>/.claude/settings.local.json
 
 ---
 
+## AC10 — Descoberta: o Claude sabe as features ao abrir (autobrief + guia gerado) 🤖👁
+O terminal se torna auto-descritível: um guia **gerado do schema** (sempre atual) e um hook
+`SessionStart` que injeta um resumo no contexto do Claude.
+
+**Passo (headless 🤖):**
+```sh
+it2agent brief                                   # resumo das capacidades ativas + como usar
+it2agent guide --check ; echo "drift exit=$?"    # 0 = guia em sincronia com o schema/tools
+# hook autobrief: OFF não injeta nada; ON injeta additionalContext (SessionStart)
+printf '{}' | it2agent-autobrief-hook            # flag OFF → sem stdout, exit 0
+it2agent-flag enable agent.autobrief
+printf '{}' | IT2AGENT_FORCE=1 it2agent-autobrief-hook | python3 -m json.tool | head -5
+```
+✅ se `brief` lista as capacidades ativas; `guide --check` sai 0 (sem drift); o hook é **observador
+seguro** (OFF→nada/exit 0; ON→JSON `hookSpecificOutput.additionalContext` com o brief).
+**Instalação por projeto (👁, num repo TEMPORÁRIO — não no seu):** `it2agent-autobrief-hook install
+--scope project` grava o hook no `<repo>/.claude/settings.local.json` (gitignored). Um Claude aberto
+nesse projeto passa a **nascer sabendo** das features. **OPERADOR:** confirme, num projeto de teste,
+que uma sessão nova do Claude recebe o brief. (Registro MCP é passo manual documentado — `claude mcp
+add`, ver `it2agent/mcp/README.md`.)
+
+## AC11 — Coastfile por projeto + `--assign` 🤖
+Declarar o isolamento **uma vez** por projeto e não repetir opções a cada spawn.
+
+**Passo (num repo git TEMPORÁRIO):**
+```sh
+mkdir -p "$TMPREPO/.it2agent" && cat > "$TMPREPO/.it2agent/isolation.toml" <<'TOML'
+ports = ["web","db"]
+canonical = true
+isolate = ["docker","db"]
+assign = "restart"
+TOML
+( cd "$TMPREPO" && IT2AGENT_FORCE=1 it2agent-worktree plan --id demo --role backend )   # aplica o arquivo
+( cd "$TMPREPO" && IT2AGENT_FORCE=1 it2agent-worktree plan --id demo --role backend --ports api --assign none )  # CLI sobrescreve
+```
+✅ se o 1º plano reflete ports web/db + canônica + isolate docker,db + assign=restart; e o 2º mostra
+que os flags de CLI **sobrescrevem** o arquivo (só `api`, sem assign).
+
+## AC12 — Leitura inbound: nativo → registry (opcional) 🤖🔴
+O daemon reflete o que o iTerm2 nativo sabe de cada sessão no **nosso registry** (mão única, read-only
+do lado nativo).
+**Passo (headless 🤖):** o mapeamento é puro e testável — `python3 -m unittest
+it2agent.daemon.tests.test_inbound` (sessão→registro; user-vars `agent_*`, cc-status→status; API-off →
+no-op). **Ao vivo 🔴:** com o daemon + Python API ligados, sessões nativas aparecem no `registry`
+(consultável via broker/MCP `list_agents`). ✅ se os testes puros passam e (ao vivo) o registry reflete
+as sessões nativas.
+
+---
+
 ## Relatório final
 Devolva esta tabela, preenchida com **evidência real**:
 
@@ -347,6 +396,9 @@ Devolva esta tabela, preenchida com **evidência real**:
 | AC7 orquestração MCP (9 tools)    | 🔴🤖   | | | |
 | AC8 flags no-op                   | 🤖     | | | |
 | AC9 GUI painel AI Agents          | 👁🔴   | | | |
+| AC10 descoberta (autobrief/guia)  | 🤖👁   | | | |
+| AC11 Coastfile + --assign         | 🤖     | | | |
+| AC12 inbound nativo→registry      | 🤖🔴   | | | |
 
 Depois da tabela:
 1. **O que passou 🤖 agora** (AC2/AC3/AC4/AC5-idempotência/AC6-mecânica+durabilidade/AC7-mecânica/AC8
