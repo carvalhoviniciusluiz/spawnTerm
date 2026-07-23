@@ -246,6 +246,58 @@ it2agent-worktree create --repo . --id 13 --role worker --isolate docker,db
   active mode after the fact; surfacing it would require new persisted state and
   is intentionally out of scope for this ENV-ONLY feature.
 
+### Coastfile (`.it2agent/isolation.toml`, optional, item 7)
+
+Instead of passing `--ports`/`--isolate`/`--canonical-port`/`--assign` on every
+spawn, a repo can declare its isolation defaults **once** in an optional file at
+`<git-root>/.it2agent/isolation.toml`. When present, `it2agent-worktree` (and, via
+it, `it2agent-spawn` / `it2agent-tmux`, which just call the helper) apply it
+automatically. **Explicit CLI flags always override the file.** No file ⇒ behavior
+is byte-identical to before.
+
+```toml
+# <git-root>/.it2agent/isolation.toml
+ports     = ["web", "db"]      # = --ports web,db
+canonical = 3000               # = --canonical-port 3000 (int base)
+isolate   = ["docker", "db"]   # = --isolate docker,db
+assign    = "restart"          # = --assign restart
+```
+
+- Only these four top-level keys are honored, parsed by a tiny, dependency-free
+  POSIX-sh reader (**not** a general TOML parser): `ports` and `isolate` are
+  arrays of strings; `canonical` is an integer base (or `true` = the default base
+  `3000`; `false`/non-integer is ignored, since canonical *activation* is still
+  the `agent.canonical_port` flag); `assign` is a string.
+- **Explicit CLI flags win.** `--ports api` on the command line replaces a
+  file `ports = [...]` entirely (per option — an unspecified option still takes
+  its file value). This is the “declare once, override when needed” model.
+- **Degrades safely.** A missing file, unknown keys, section headers
+  (`[ports]`), comments, empty arrays, or a malformed value are all ignored — the
+  affected option simply falls back to its normal default. A bad file never
+  aborts a spawn.
+- The file is inert on its own: the ports/canonical/isolate it declares still go
+  through the very same gated paths (`agent.worktree_isolation`,
+  `agent.canonical_port`, `agent.isolate_docker`/`agent.isolate_db`) as the
+  equivalent CLI flags, so nothing new is activated just by writing the file.
+
+### Assign strategy (`--assign none|restart`, item 8)
+
+`--assign <strategy>` is a **thin hook** describing what to do with a service when
+a worktree is *reused* (a `create` for an id that already has one). it2agent does
+**not** own a process supervisor, so this is a signal, not an orchestrator:
+
+| Strategy | Effect |
+| --- | --- |
+| `none` (default) | Reuse the worktree untouched — today's idempotent behavior. Emits nothing. |
+| `restart` | `create` prints `assign=restart` and an `env_IT2AGENT_ASSIGN=restart` line, so the wrappers export `IT2AGENT_ASSIGN=restart` into the session; the agent command keys on it to bounce its dev server. it2agent invokes nothing itself. |
+| `hot` / `rebuild` | **Recognized aliases that map to `none`** (documented no-ops). Full file-watch / image-rebuild orchestration is out of scope for a macOS CLI that doesn't own the supervisor — research flagged them as ceremony for the tab-per-agent model. A warning notes the remap. |
+
+Any other value is a hard error (exit 2) naming the bad strategy. `--assign` can
+also be declared in the Coastfile (`assign = "restart"`); the CLI flag overrides
+it. When the resolved strategy is `none` (the default, including the normalized
+`hot`/`rebuild`), no `assign`/`IT2AGENT_ASSIGN` line is emitted, so the output
+stays byte-identical to before.
+
 ## `create` / `cleanup` (the side-effect layer)
 
 ```sh
