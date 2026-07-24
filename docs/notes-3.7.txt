@@ -2387,3 +2387,23 @@ Bug Fixes:
   duplicate the Cockpit. Runs only when the
   daemon is up and the Python API is reachable;
   otherwise it is a clean no-op.
+- it2agent broker is now hardened for sustained
+  use. On startup a corrupt or unreadable sqlite
+  db is refused with a clear message and a
+  nonzero exit instead of a raw traceback, and
+  is never silently recreated; a deliberate
+  --reset moves the bad file aside (as
+  <db>.corrupt-<ts>) and starts fresh. A
+  leftover socket from a dead broker is
+  reclaimed automatically, while a socket a live
+  broker still owns is refused with an "already
+  running" message. A failed write (e.g. disk
+  full) now fails just that one operation and
+  rolls back, keeping the process up and the db
+  intact. Two maintenance commands bound the
+  db's growth: "prune" deletes acked messages
+  older than N days (7 by default; un-acked
+  messages, cursors, and exactly-once delivery
+  are always preserved) and can cap handoff
+  history per agent/goal, and "vacuum" reclaims
+  the freed space on disk.

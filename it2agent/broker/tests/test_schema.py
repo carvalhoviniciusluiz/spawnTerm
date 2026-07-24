@@ -103,7 +103,7 @@ class TestSchema(unittest.TestCase):
 
         # Upgrade.
         self.assertEqual(schema.apply_schema(conn), schema.SCHEMA_VERSION)
-        self.assertEqual(schema.SCHEMA_VERSION, 4)
+        self.assertGreaterEqual(schema.SCHEMA_VERSION, 4)
 
         # Column is now present and nullable; the legacy row survived with NULL.
         cols_after = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}

@@ -25,6 +25,7 @@ structured error responses — the server never crashes on bad input.
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -82,11 +83,31 @@ def error(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": payload}
 
 
+def _rollback(ctx: "BrokerContext") -> None:
+    """Best-effort rollback of a half-applied write so the db stays consistent.
+
+    On any handler failure we discard the current (possibly partial) transaction
+    rather than leave the shared connection stuck mid-write. WAL guarantees the
+    last committed state is intact, so rolling back an uncommitted write leaves
+    the on-disk db consistent (``PRAGMA quick_check`` still ``ok``).
+    """
+    conn = getattr(ctx, "conn", None) if ctx is not None else None
+    if conn is None:
+        return
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001 - rollback itself must never crash the server
+        pass
+
+
 def handle(request: Any, ctx: "BrokerContext") -> dict[str, Any]:
     """Route one decoded request to its handler; never raises.
 
-    Bad shape → ``bad_request``. Unknown op → ``unknown_op``. A handler that
-    raises → ``internal`` (with the exception text). All are ``ok:false``.
+    Bad shape → ``bad_request``. Unknown op → ``unknown_op``. A storage failure
+    (disk full, I/O error, locked db — any ``sqlite3.Error``) → ``storage``,
+    after rolling the partial write back so the db is not corrupted and the
+    process stays up. Any other handler exception → ``internal``. All of these
+    are ``ok:false`` responses — the op fails cleanly, the server survives.
     """
     if not isinstance(request, dict):
         return error("bad_request", "request must be a JSON object")
@@ -98,7 +119,14 @@ def handle(request: Any, ctx: "BrokerContext") -> dict[str, Any]:
         return error("unknown_op", f"unknown op: {op}", op=op)
     try:
         return func(request, ctx)
+    except sqlite3.Error as exc:
+        # Storage-layer failure (e.g. disk full → "database or disk is full",
+        # a read-only db, an I/O error). Fail the OP cleanly, never the process,
+        # and never a partial write: roll back so the db stays consistent.
+        _rollback(ctx)
+        return error("storage", f"{type(exc).__name__}: {exc}", op=op)
     except Exception as exc:  # noqa: BLE001 - never crash the server on a handler bug
+        _rollback(ctx)
         return error("internal", f"{type(exc).__name__}: {exc}", op=op)
 
 

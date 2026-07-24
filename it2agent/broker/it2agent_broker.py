@@ -117,12 +117,43 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="bypass the agent.broker feature-flag gate (local testing).",
     )
+    serve.add_argument(
+        "--reset",
+        action="store_true",
+        help="if the db is corrupt, move it aside (as <db>.corrupt-<ts>) and "
+        "start fresh. DATA LOSS: discards the durable queue/registry/handoff "
+        "state. Deliberate operator action; never automatic.",
+    )
     serve.add_argument("-v", "--verbose", action="store_true", help="debug logging.")
 
     for name, helptext in (("ping", "ping a running broker"), ("health", "query a running broker")):
         c = sub.add_parser(name, help=helptext)
         c.add_argument("--sock", default=None, help="unix socket path override.")
         c.add_argument("-v", "--verbose", action="store_true", help="debug logging.")
+
+    # Maintenance ops (#133): a running broker prunes acked-old history + reclaims
+    # space. Talk to an already-running server over the socket, like ping/health.
+    prune = sub.add_parser(
+        "prune", help="prune acked messages older than N days (bounded growth)."
+    )
+    prune.add_argument("--sock", default=None, help="unix socket path override.")
+    prune.add_argument(
+        "--max-age-days",
+        type=float,
+        default=None,
+        help="age floor for pruning acked messages (default: broker's 7).",
+    )
+    prune.add_argument(
+        "--keep-handoffs",
+        type=int,
+        default=None,
+        help="optional: cap handoff history to the last K per (agent, goal).",
+    )
+    prune.add_argument("-v", "--verbose", action="store_true", help="debug logging.")
+
+    vacuum = sub.add_parser("vacuum", help="VACUUM the broker db to reclaim space.")
+    vacuum.add_argument("--sock", default=None, help="unix socket path override.")
+    vacuum.add_argument("-v", "--verbose", action="store_true", help="debug logging.")
 
     path = sub.add_parser("paths", help="print the resolved db + socket paths.")
     path.add_argument("--sock", default=None)
@@ -143,15 +174,20 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         return 0
     import server
 
-    return server.run(_resolve_sock(args.sock), _resolve_db(args.db), logger)
+    return server.run(
+        _resolve_sock(args.sock),
+        _resolve_db(args.db),
+        logger,
+        reset=getattr(args, "reset", False),
+    )
 
 
-def _cmd_client(op: str, args: argparse.Namespace) -> int:
+def _cmd_client(op: str, args: argparse.Namespace, request: dict | None = None) -> int:
     from client import BrokerClient
 
     client = BrokerClient(sock_path=_resolve_sock(args.sock))
     try:
-        response = client.request({"op": op})
+        response = client.request(request or {"op": op})
     except OSError as exc:
         print(
             f"{PROG} {op}: cannot reach broker at {client.sock_path} ({exc}). "
@@ -161,6 +197,15 @@ def _cmd_client(op: str, args: argparse.Namespace) -> int:
         return 1
     print(json.dumps(response, sort_keys=True))
     return 0 if response.get("ok") else 1
+
+
+def _cmd_prune(args: argparse.Namespace) -> int:
+    request: dict = {"op": "prune"}
+    if args.max_age_days is not None:
+        request["max_age_days"] = args.max_age_days
+    if args.keep_handoffs is not None:
+        request["keep_handoffs"] = args.keep_handoffs
+    return _cmd_client("prune", args, request=request)
 
 
 def _cmd_paths(args: argparse.Namespace) -> int:
@@ -180,6 +225,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_serve(args)
     if command in ("ping", "health"):
         return _cmd_client(command, args)
+    if command == "prune":
+        return _cmd_prune(args)
+    if command == "vacuum":
+        return _cmd_client("vacuum", args)
     if command == "paths":
         return _cmd_paths(args)
     parser.print_help(sys.stderr)
