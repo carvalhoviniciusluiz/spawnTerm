@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# it2agent-mcp — thin wrapper so `it2agent mcp …` (and the it2agent-mcp CLI on
+# PATH after `it2agent install`) run the mcp Python module from a stable path,
+# regardless of the caller's cwd. scope:external-tooling.
+d="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$d/mcp/it2agent_mcp.py" "$@"

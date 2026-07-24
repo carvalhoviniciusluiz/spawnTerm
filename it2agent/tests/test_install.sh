@@ -65,6 +65,11 @@ missing=""
 notexec=""
 badtarget=""
 n_expected=0
+# POSIX: list-then-loop via a tmpfile (macOS /bin/sh is bash 3.2 in POSIX mode
+# and rejects `done < <(...)` process substitution). The redirect keeps the loop
+# in the current shell so n_expected/missing/notexec/badtarget persist.
+_cli_list="$(mktemp)"
+"$INSTALL" --list > "$_cli_list"
 while IFS= read -r cli; do
 	[ -n "$cli" ] || continue
 	n_expected=$((n_expected + 1))
@@ -74,7 +79,8 @@ while IFS= read -r cli; do
 	[ -x "$w" ] || notexec="$notexec $name"
 	# The wrapper must exec the exact source CLI it wraps.
 	grep -q "exec \"$cli\" \"\$@\"" "$w" || badtarget="$badtarget $name"
-done < <("$INSTALL" --list)
+done < "$_cli_list"
+rm -f "$_cli_list"
 
 if [ -z "$missing" ]; then green "a wrapper exists for every enumerated CLI ($n_expected)"; else red "missing wrappers:$missing"; fi
 if [ -z "$notexec" ]; then green "every wrapper is executable"; else red "not executable:$notexec"; fi

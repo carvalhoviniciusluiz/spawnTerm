@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# it2agent-broker — thin wrapper so `it2agent broker …` (and the it2agent-broker CLI on
+# PATH after `it2agent install`) run the broker Python module from a stable path,
+# regardless of the caller's cwd. scope:external-tooling.
+d="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$d/broker/it2agent_broker.py" "$@"

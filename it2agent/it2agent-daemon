@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# it2agent-daemon — thin wrapper so `it2agent daemon …` (and the it2agent-daemon CLI on
+# PATH after `it2agent install`) run the daemon Python module from a stable path,
+# regardless of the caller's cwd. scope:external-tooling.
+d="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$d/daemon/it2agent_daemon.py" "$@"
