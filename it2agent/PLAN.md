@@ -1,7 +1,7 @@
 # it2agent — execution plan & dependency graph
 
 > **Start here.** This is the ordered plan for building it2agent. It is self-contained: read this +
-> the tracking issues (`gh issue list --repo carvalhoviniciusluiz/spawnTerm`) and you know exactly
+> the tracking issues (`gh issue list --repo carvalhoviniciusluiz/it2agent`) and you know exactly
 > what to do and in what order. All code lives under `it2agent/`. Do **not** edit iTerm2 source
 > except in `scope:iterm2-core` issues (Tier 4 / the settings pane).
 
