@@ -87,9 +87,16 @@ run_suite() {
 
 # --- Python unittest suites (self-contained; run each in its own process) -----
 # Sorted for stable, reproducible order. Excludes *_live.py (LIVE layer).
+# POSIX-portable list-then-loop (no `< <(...)` process substitution, which macOS
+# /bin/sh — bash in POSIX mode — rejects). Redirecting from a temp file keeps the
+# loop in the current shell so pass/fail counters persist. Works under bash (CI)
+# and sh (the documented `sh run_headless.sh`).
+_pylist="$(mktemp -t it2agent-headless-py.XXXXXX)"
+find it2agent -path '*/tests/test_*.py' | grep -v '_live\.py$' | sort > "$_pylist"
 while IFS= read -r t; do
 	run_suite "py  $t" python3 "$t"
-done < <(find it2agent -path '*/tests/test_*.py' | grep -v '_live\.py$' | sort)
+done < "$_pylist"
+rm -f "$_pylist"
 
 # --- Shell suites -------------------------------------------------------------
 # Excludes *_live.sh (LIVE layer, e.g. test_spawn_delivery_live.sh).
@@ -104,13 +111,16 @@ done < <(find it2agent -path '*/tests/test_*.py' | grep -v '_live\.py$' | sort)
 # in full on a dev Mac or self-hosted runner (flag unset) — same tier as the
 # live surfaces. This is a coarse suite-level skip, not a way to fake the check.
 skip_osacompile="${IT2AGENT_SKIP_OSACOMPILE:-}"
+_shlist="$(mktemp -t it2agent-headless-sh.XXXXXX)"
+find it2agent -path '*/tests/test_*.sh' | grep -v '_live\.sh$' | sort > "$_shlist"
 while IFS= read -r t; do
 	if [ -n "$skip_osacompile" ] && grep -q 'osacompile' "$t"; then
 		printf '\n\033[33mSKIP\033[0m sh  %s (osacompile iTerm2-terminology check; run on a Mac with iTerm2)\n' "$t"
 		continue
 	fi
 	run_suite "sh  $t" bash "$t"
-done < <(find it2agent -path '*/tests/test_*.sh' | grep -v '_live\.sh$' | sort)
+done < "$_shlist"
+rm -f "$_shlist"
 
 # --- live_smoke.py ccstatus surface (headless-capable, needs no live API) -----
 # The only live_smoke surface that runs without iTerm2: exact OSC 21337 bytes.
