@@ -1,0 +1,131 @@
+# Live smoke CI — the LIVE layer gate (issue #132, part of #1).
+#
+# WHY THIS EXISTS
+# ---------------
+# The other two workflows only cover the layers a HOSTED GitHub runner can reach:
+#   * test.yml           — Python-API library (ubuntu) + Xcode ModernTests (macOS).
+#   * headless-tests.yml — the PURE it2agent layer + `live_smoke.py --only ccstatus`
+#                          (the one live surface that needs no running iTerm2).
+# Four of seven production bugs (#74/#81/#85/#76) only showed up LIVE, in the
+# layer that talks to a RUNNING iTerm2 (Python API / AppleScript). A hosted runner
+# has no GUI, no iTerm2, and no Python API socket, so it can NEVER exercise the
+# spawn / tmux / mcp surfaces. That is the "live layer has no CI" gap this closes.
+#
+# HOW IT CLOSES IT
+# ----------------
+# This job pins `runs-on: [self-hosted, macOS, it2agent-live]`. The distinctive
+# `it2agent-live` label means it ONLY dispatches to the operator's registered Mac
+# (iTerm2 3.7.dev running + the Python API enabled). It never lands on a hosted
+# runner. If no matching self-hosted runner is online the job simply stays QUEUED
+# / pending — that is EXPECTED and does NOT block or fail the hosted CI in the
+# other two workflows (they are separate workflows with their own runners).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# OPERATOR: REGISTER YOUR MAC AS THE SELF-HOSTED RUNNER (one-time)
+# ─────────────────────────────────────────────────────────────────────────────
+# Prerequisites on the Mac (must hold every time the job runs, not just at setup):
+#   1. iTerm2 3.7.dev is installed AND RUNNING with at least one open window/tab
+#      (the live surfaces open real tabs; the app must be up, not just installed).
+#   2. The iTerm2 Python API server is enabled:
+#        defaults write com.googlecode.iterm2 EnableAPIServer -bool true
+#      (In the UI: Settings → General → Magic → “Enable Python API”.) Confirm:
+#        defaults read com.googlecode.iterm2 EnableAPIServer   # must print 1
+#   3. `python3 -c "import iterm2"` works for the python3 the runner will use
+#      (the runner inherits the login shell's PATH; install the iterm2 package
+#      into that interpreter).
+#
+# Register the runner (GitHub UI does the token dance for you):
+#   a. Repo → Settings → Actions → Runners → “New self-hosted runner”.
+#   b. Pick macOS / your arch. Follow the shown download + `./config.sh` commands
+#      (they embed a one-time registration token — do not hard-code it here).
+#   c. When `./config.sh` prompts “Enter any additional labels”, type:
+#        it2agent-live
+#      (The default `self-hosted` and `macOS`/`Darwin` labels are added
+#      automatically; this workflow’s `runs-on` requires ALL THREE together.)
+#   d. Start it: `./run.sh` (foreground) or `./svc.sh install && ./svc.sh start`
+#      to run it as a launchd service. IMPORTANT: the runner process must have a
+#      GUI session (a logged-in desktop) so iTerm2 can open windows — run it as
+#      your logged-in user, not as a headless root daemon.
+#
+# Verify the label took: Settings → Actions → Runners should list your runner as
+# Idle with the `it2agent-live` label. Then trigger this workflow via
+# “Run workflow” (workflow_dispatch) and confirm it picks up your runner.
+#
+# See it2agent/docs/live-smoke-ci.md for the same steps plus troubleshooting.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Live Smoke (self-hosted)
+
+on:
+  # Manual button in the Actions tab. Always available.
+  workflow_dispatch:
+  # Daily regression sweep. 07:00 UTC. Only fires if a matching self-hosted
+  # runner is online; otherwise the run queues harmlessly.
+  schedule:
+    - cron: '0 7 * * *'
+  # PRs run this ONLY when explicitly labelled `live` (the `if:` on the job gates
+  # it). Unlabelled PRs never trigger the live layer, so day-to-day PRs are not
+  # blocked on the operator's Mac being online. `labeled` is included so adding
+  # the label to an open PR kicks off a run.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+# One live run at a time — the surfaces open real iTerm2 tabs on a single Mac, so
+# concurrent runs would fight over the same GUI. Newer runs supersede older ones.
+concurrency:
+  group: live-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-smoke:
+    # Runs on manual/scheduled triggers unconditionally; on pull_request only when
+    # the PR carries the `live` label (keeps the live gate off unlabelled PRs).
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'live')
+    # The `it2agent-live` label is the safety pin: only the operator's registered
+    # Mac has it, so this can never dispatch to a hosted runner.
+    runs-on: [self-hosted, macOS, it2agent-live]
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          python3 --version
+          # Informational preflight echo. live_smoke.py does the authoritative
+          # checks (3.7.dev build, `import iterm2`, EnableAPIServer==1) and will
+          # SKIP the live surfaces + exit nonzero if any prerequisite is missing —
+          # it never fabricates a live PASS.
+          echo "EnableAPIServer=$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || echo 'unset')"
+          python3 -c "import iterm2; print('iterm2 module OK')" || echo "::warning::iterm2 module not importable for this python3"
+
+      - name: Live smoke (all surfaces, JSON) — fail on any surface != PASS
+        # live_smoke.py exits 0 iff EVERY selected surface PASSED; any FAIL/SKIP
+        # yields nonzero (it never fabricates a live PASS). That is the
+        # "fail on any surface != PASS" contract.
+        #
+        # ONE bounded retry, ONLY for a transient tmux attach timeout (#127): the
+        # tmux -CC surface is the biggest flakiness source because iTerm2 attaches
+        # the integrated session a beat after tmux creates it, and a busy machine
+        # can push that past the wait deadline. Per the live_smoke.py docstring a
+        # tmux-surface timeout is RETRYABLE / non-fatal. So on a first-pass
+        # failure we parse the JSON and re-run ONLY when tmux is the *sole*
+        # non-PASS surface, with a bumped attach timeout. If ANY other surface
+        # (spawn/mcp/ccstatus) is non-PASS we fail immediately — the retry can
+        # never mask a real regression.
+        run: |
+          if python3 it2agent/tests/live_smoke.py --json | tee smoke.json; then
+            echo "All surfaces PASSED."
+            exit 0
+          fi
+          failed=$(python3 -c "import json; d=json.load(open('smoke.json')); print(' '.join(s['surface'] for s in d['surfaces'] if s['status'] != 'PASS'))")
+          echo "Non-PASS surfaces: [$failed]"
+          if [ "$failed" != "tmux" ]; then
+            echo "::error::A non-tmux surface failed (or multiple surfaces did); not retrying — this is a real regression."
+            exit 1
+          fi
+          echo "::warning::Only the tmux surface failed on the first pass; retrying it once with a 90s attach timeout (#127)."
+          IT2AGENT_SMOKE_TMUX_TIMEOUT=90 python3 it2agent/tests/live_smoke.py --json --only tmux
