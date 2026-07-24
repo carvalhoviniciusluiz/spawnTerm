@@ -1190,7 +1190,7 @@ const CGFloat PTYTextViewMarginClickGraceWidth = 2.0;
     // imeLines counts the rows the marked text actually covers, which can extend
     // below numberOfLines * _lineHeight into the extra IME headroom.
     const int topRow = [_dataSource cursorY] - 1 + [_dataSource numberOfLines] - [_dataSource height];
-    const NSRect imeRect = NSMakeRect([iTermPreferences intForKey:kPreferenceKeySideMargins],
+    const NSRect imeRect = NSMakeRect([iTermPreferences sideMargins],
                                       topRow * _lineHeight,
                                       width * _charWidth,
                                       imeLines * _lineHeight);
@@ -7198,6 +7198,11 @@ static NSString *iTermStringFromRange(NSRange range) {
 
 - (NSRange)keyboardHandlerMarkedTextRange:(iTermKeyboardHandler *)keyboardhandler {
     return _drawingHelper.inputMethodMarkedRange;
+}
+
+- (BOOL)keyboardHandler:(iTermKeyboardHandler *)keyboardhandler
+    sendTmuxControlModeKeyEvent:(NSEvent *)event {
+    return [self.delegate textViewSendTmuxControlModeKeyEvent:event];
 }
 
 - (void)keyboardHandler:(iTermKeyboardHandler *)keyboardhandler
