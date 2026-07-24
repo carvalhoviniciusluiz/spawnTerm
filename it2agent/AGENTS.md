@@ -9,7 +9,7 @@
 
 ## Where to start
 1. Open **Epic issue #1** — it is the single source of truth: the concept, the 5-tier plan with
-   dependencies, and the working protocol. https://github.com/carvalhoviniciusluiz/spawnTerm/issues/1
+   dependencies, and the working protocol. https://github.com/carvalhoviniciusluiz/it2agent/issues/1
 2. The five tiers are sub-issues of the epic (#2–#6). Only issues labeled **`ready-for-agent`**,
    **unassigned**, and **not `status:blocked`** may be claimed.
 
