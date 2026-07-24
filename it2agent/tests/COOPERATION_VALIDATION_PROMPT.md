@@ -414,6 +414,20 @@ python3 "$ST/tests/live_smoke.py" --only ccstatus   # escopar uma superfície
 **PASS**. Sem a API, as 3 superfícies vivas dão **SKIP honesto** (exit≠0, nada fingido) e o `ccstatus`
 ainda **PASS**. O harness **limpa tudo** (mata broker/tmux, remove repos/worktrees temporários, fecha
 só as abas que abriu). É o item "harness de fumaça ao vivo" do go-live.
+> Nota (#127): a superfície `tmux` agora casa a sessão por um **marcador único por run**
+> (`it2smoke-<pid>-<rand>`, não mais o basename), falha ruidosamente se >1 casar, e o timeout é
+> configurável (`--tmux-timeout` / `IT2AGENT_SMOKE_TMUX_TIMEOUT`, default 30s).
+
+## AC15 — Regressão da camada PURA em 1 comando (o gate de CI) 🤖
+Todas as suites headless num runner só — é o que o CI (`.github/workflows/headless-tests.yml`) roda em
+cada push/PR.
+```sh
+sh "$ST/tests/run_headless.sh"      # descobre e roda todo test_*.py / test_*.sh + live_smoke --only ccstatus
+```
+✅ se imprime `suites passed: N  failed: 0` e **exit 0**. Falha ruidosa (exit≠0) em qualquer suite
+vermelha. Hermético (não roda `it2agent install`; `IT2AGENT_CONFIG` isolado). Num host sem iTerm2
+rodando, as 2 suites com check de `osacompile` (spawn/tmux) fazem **skip honesto** (`IT2AGENT_SKIP_OSACOMPILE=1`) —
+rodam completas no Mac de dev. A camada VIVA (spawn/tmux/mcp) continua no AC14 (`live_smoke.py`), não aqui.
 
 ---
 
@@ -436,6 +450,7 @@ Devolva esta tabela, preenchida com **evidência real**:
 | AC12 inbound nativo→registry      | 🤖🔴   | | | |
 | AC13 instalador de wrappers       | 🤖     | | | |
 | AC14 harness de fumaça ao vivo    | 🔴🤖   | | | |
+| AC15 run_headless.sh (gate CI)    | 🤖     | | | |
 
 Depois da tabela:
 1. **O que passou 🤖 agora** (AC2/AC3/AC4/AC5-idempotência/AC6-mecânica+durabilidade/AC7-mecânica/AC8
