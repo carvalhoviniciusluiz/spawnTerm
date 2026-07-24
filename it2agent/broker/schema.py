@@ -15,6 +15,13 @@ records which numbered migrations have run; :func:`apply_schema` applies only
 the pending ones and is safe to call repeatedly. #35 (mailbox: messages) and
 #36 (agent registry + handoff/state history) add their tables by appending new
 entries to :data:`MIGRATIONS` (v2, v3, …) — no restructuring here.
+
+Resilience (#133): :func:`init_db` refuses to open a corrupt/unreadable file. It
+runs an integrity check on open and, on any sqlite ``DatabaseError`` (or a
+non-``ok`` check), raises :class:`CorruptDatabaseError` with a clear, actionable
+message instead of a raw traceback — and it never silently recreates the file
+(that would be silent data loss). An operator can deliberately move a corrupt db
+aside and start fresh with :func:`reset_corrupt_db` (wired to ``serve --reset``).
 """
 
 from __future__ import annotations
@@ -22,11 +29,24 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
+from typing import Optional
 
 # Bump when a new migration is appended below. Equals the highest migration
 # version (#35 owns v2 `messages`; #36 owns v3 `agents` + `handoffs`;
-# #95 owns v4 `messages.idempotency_key` + its partial-unique index).
-SCHEMA_VERSION = 4
+# #95 owns v4 `messages.idempotency_key` + its partial-unique index;
+# #133 owns v5 `messages(state, created_at)` retention index).
+SCHEMA_VERSION = 5
+
+
+class CorruptDatabaseError(Exception):
+    """Raised when the broker's sqlite db is corrupt or unreadable on open.
+
+    Carries a ready-to-print, actionable message (what failed, the path, and how
+    to recover) so the entry point can surface a clean error and a nonzero exit
+    rather than a raw ``sqlite3.DatabaseError`` traceback. The broker never
+    recreates the file on its own — recovery is an explicit operator action
+    (restore a backup, or ``serve --reset``) so data loss is never silent.
+    """
 
 # Busy timeout for lock contention across processes (WAL still serializes
 # writers). Seconds for the sqlite3.connect timeout; ms for the PRAGMA.
@@ -121,24 +141,88 @@ MIGRATIONS: dict[int, list[str]] = {
         "  ON messages(recipient, idempotency_key)"
         "  WHERE idempotency_key IS NOT NULL",
     ],
+    # v5 (#133 retention): a supporting index for the retention/prune sweep,
+    # which deletes ACKED messages older than a cutoff (see maintenance.py).
+    # An index on (state, created_at) lets that DELETE locate prunable rows
+    # without a full-table scan. Purely additive — no column or table change,
+    # existing rows are untouched; an older db upgrades in place by just
+    # creating the index.
+    5: [
+        "CREATE INDEX IF NOT EXISTS idx_messages_state_created_at"
+        "  ON messages(state, created_at)",
+    ],
 }
+
+
+def _corrupt_message(path: str | Path, detail: object) -> str:
+    """Build the actionable message carried by :class:`CorruptDatabaseError`."""
+    return (
+        "broker database is corrupt or unreadable: {detail}\n"
+        "  path: {path}\n"
+        "The broker will NOT recreate it automatically — that would silently "
+        "discard the durable queue/registry/handoff state.\n"
+        "If you have a backup, restore it. Otherwise re-run with --reset to move "
+        "the corrupt file aside (as <db>.corrupt-<ts>) and start fresh:\n"
+        "  it2agent-broker serve --reset".format(detail=detail, path=path)
+    )
 
 
 def open_db(path: str | Path) -> sqlite3.Connection:
     """Open (creating parent dirs as needed) the sqlite db in WAL mode.
 
     Does not create the schema — call :func:`apply_schema` (or :func:`init_db`).
+    Raises :class:`CorruptDatabaseError` (not a raw ``sqlite3.DatabaseError``) if
+    the file is not a valid sqlite database — the first PRAGMA reads the header.
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p), timeout=BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     # WAL for concurrent readers alongside a writer; busy timeout so a locked
-    # write waits instead of raising immediately.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA foreign_keys=ON")
+    # write waits instead of raising immediately. These PRAGMAs touch the file
+    # header, so a non-database file blows up here — translate that into a clear
+    # CorruptDatabaseError rather than leaking the raw sqlite traceback.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.DatabaseError as exc:
+        conn.close()
+        raise CorruptDatabaseError(_corrupt_message(p, exc)) from exc
     return conn
+
+
+def check_integrity(conn: sqlite3.Connection) -> str:
+    """Return the result of ``PRAGMA quick_check`` (``"ok"`` when healthy).
+
+    ``quick_check`` is the cheaper cousin of ``integrity_check`` (it skips the
+    slow index cross-checks) — fast enough to run on every startup. Callers can
+    also use it to assert the db is still consistent after a failed write.
+    """
+    row = conn.execute("PRAGMA quick_check").fetchone()
+    return str(row[0]) if row is not None else ""
+
+
+def reset_corrupt_db(path: str | Path) -> Optional[Path]:
+    """Move a corrupt db (and its WAL sidecars) aside so a fresh one can open.
+
+    The main file is *renamed* to ``<db>.corrupt-<epoch>`` (never deleted, so a
+    later forensic recovery is possible) and the ``-wal``/``-shm`` sidecars are
+    removed. Returns the backup path (``None`` if there was no file to move).
+    This is a deliberate operator action (``serve --reset``), never automatic.
+    """
+    p = Path(path)
+    backup: Optional[Path] = None
+    if p.exists():
+        backup = p.with_name(f"{p.name}.corrupt-{int(time.time())}")
+        p.rename(backup)
+    for suffix in ("-wal", "-shm"):
+        side = Path(f"{p}{suffix}")
+        try:
+            side.unlink()
+        except FileNotFoundError:
+            pass
+    return backup
 
 
 def journal_mode(conn: sqlite3.Connection) -> str:
@@ -180,7 +264,26 @@ def apply_schema(conn: sqlite3.Connection) -> int:
 
 
 def init_db(path: str | Path) -> sqlite3.Connection:
-    """Open the db and apply the schema in one step; return the connection."""
-    conn = open_db(path)
-    apply_schema(conn)
+    """Open the db, verify integrity, and apply the schema; return the connection.
+
+    Raises :class:`CorruptDatabaseError` (with a clear, actionable message — not
+    a raw traceback) if the file is not a readable, consistent sqlite database.
+    Never recreates a corrupt file: recovery is an explicit operator action (see
+    :func:`reset_corrupt_db`, wired to ``serve --reset``).
+    """
+    p = Path(path)
+    conn = open_db(p)  # raises CorruptDatabaseError on an unreadable header
+    try:
+        status = check_integrity(conn).lower()
+        if status != "ok":
+            raise CorruptDatabaseError(
+                _corrupt_message(p, f"quick_check reported: {status}")
+            )
+        apply_schema(conn)
+    except sqlite3.DatabaseError as exc:
+        conn.close()
+        raise CorruptDatabaseError(_corrupt_message(p, exc)) from exc
+    except CorruptDatabaseError:
+        conn.close()
+        raise
     return conn

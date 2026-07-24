@@ -18,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import sys
 from pathlib import Path
 from typing import Optional
 
 import dispatch
 import mailbox  # noqa: F401 - registers the #35 send/poll/fetch/ack ops on import
+import maintenance  # noqa: F401 - registers the #133 prune/vacuum ops on import
 import protocol
 import schema
 import store  # noqa: F401 - registers the #36 registry/handoff ops on import
@@ -45,6 +47,22 @@ class SockPathTooLongError(Exception):
     surface a clean error instead of the raw ``OSError: AF_UNIX path too long``
     traceback that :func:`asyncio.start_unix_server` would otherwise emit.
     """
+
+
+class BrokerAlreadyRunningError(Exception):
+    """Raised at startup when a *live* broker already owns the socket path.
+
+    Distinguished from a stale/orphan socket (a leftover file from a dead
+    broker), which is reclaimed automatically. Carries a clear "already running"
+    message so the entry point can refuse with a nonzero exit rather than clobber
+    a running instance's socket.
+    """
+
+
+# How long to wait for a connect() when probing whether a broker owns an existing
+# socket. A live listener accepts immediately; a stale socket refuses at once. A
+# short bound keeps startup snappy even if the path is on a slow filesystem.
+_PROBE_TIMEOUT_SECONDS = 0.5
 
 
 def _check_sock_path_length(sock_path: Path) -> None:
@@ -76,10 +94,12 @@ class BrokerServer:
         sock_path: str | Path,
         db_path: str | Path,
         logger: Optional[logging.Logger] = None,
+        reset: bool = False,
     ) -> None:
         self.sock_path = Path(sock_path)
         self.db_path = Path(db_path)
         self.logger = logger or logging.getLogger("agent.broker")
+        self.reset = reset
         self._conn = None
         self._ctx: Optional[dispatch.BrokerContext] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -88,13 +108,69 @@ class BrokerServer:
     # -- lifecycle --------------------------------------------------------- #
 
     def _prepare(self) -> None:
-        """Open the db + build the dispatch context (idempotent schema)."""
-        self._conn = schema.init_db(self.db_path)
+        """Open the db + build the dispatch context (idempotent schema).
+
+        A corrupt/unreadable db raises :class:`schema.CorruptDatabaseError`; we do
+        NOT recreate it silently. With ``reset`` the operator has opted in, so we
+        move the corrupt file aside (backing it up) and start fresh.
+        """
+        try:
+            self._conn = schema.init_db(self.db_path)
+        except schema.CorruptDatabaseError:
+            if not self.reset:
+                raise
+            backup = schema.reset_corrupt_db(self.db_path)
+            self.logger.warning(
+                "reset: corrupt db at %s moved to %s; starting fresh (durable "
+                "queue/registry/handoff state discarded)",
+                self.db_path,
+                backup,
+            )
+            self._conn = schema.init_db(self.db_path)
         self._ctx = dispatch.BrokerContext(
             conn=self._conn,
             db_path=str(self.db_path),
             sock_path=str(self.sock_path),
         )
+
+    def _socket_owner_alive(self) -> bool:
+        """Return True iff a live broker is currently listening on the socket.
+
+        Probes by connecting: a live listener accepts; a stale/orphan socket file
+        (dead owner) refuses with ``ECONNREFUSED``. A path that exists but is not
+        a socket, or any other connect error, is treated as *not alive* so the
+        stale entry can be cleared and we can bind.
+        """
+        if not self.sock_path.exists():
+            return False
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(_PROBE_TIMEOUT_SECONDS)
+        try:
+            probe.connect(str(self.sock_path))
+        except OSError:
+            return False
+        else:
+            return True
+        finally:
+            probe.close()
+
+    def _reclaim_socket_or_refuse(self) -> None:
+        """Handle an existing socket file before bind: reclaim if stale, else refuse.
+
+        Mirrors the #104 lease-reclaim robustness: a leftover socket from a dead
+        broker is removed so we can bind; a socket a *live* broker still owns is
+        refused with :class:`BrokerAlreadyRunningError` rather than clobbered.
+        """
+        if self._socket_owner_alive():
+            raise BrokerAlreadyRunningError(
+                "a broker is already running on this socket; refusing to start a "
+                "second instance.\n"
+                "  socket: {sock}\n"
+                "Stop the running broker first, or use a different --sock / "
+                "IT2AGENT_BROKER_SOCK.".format(sock=self.sock_path)
+            )
+        # Absent or stale (dead owner): clear any leftover file so bind succeeds.
+        self._unlink_socket()
 
     def _unlink_socket(self) -> None:
         """Remove a stale socket file so bind() succeeds; ignore if absent."""
@@ -118,9 +194,11 @@ class BrokerServer:
         # bind() with an opaque ``OSError: AF_UNIX path too long``; raise a clear,
         # actionable error instead (caught by :func:`run`).
         _check_sock_path_length(self.sock_path)
-        self._prepare()
         self.sock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._unlink_socket()
+        # Refuse to start atop a live broker; reclaim a stale/orphan socket. Done
+        # before opening the db so "already running" fails fast and cheaply.
+        self._reclaim_socket_or_refuse()
+        self._prepare()
         server = await asyncio.start_unix_server(
             self._handle_client, path=str(self.sock_path)
         )
@@ -185,19 +263,37 @@ class BrokerServer:
         return dispatch.handle(request, self._ctx)
 
 
-def run(sock_path: str | Path, db_path: str | Path, logger: logging.Logger) -> int:
+def run(
+    sock_path: str | Path,
+    db_path: str | Path,
+    logger: logging.Logger,
+    reset: bool = False,
+) -> int:
     """Blocking entry point: serve until interrupted (Ctrl-C).
 
     Returns a process exit code: 0 on a clean shutdown, nonzero when startup
-    fails with a known, user-actionable condition (currently a too-long socket
-    path — reported clearly to stderr rather than as a raw traceback).
+    fails with a known, user-actionable condition — reported clearly to stderr
+    rather than as a raw traceback:
+
+    * a too-long socket path (:class:`SockPathTooLongError`),
+    * a corrupt/unreadable db (:class:`schema.CorruptDatabaseError`; recover with
+      a backup or ``--reset``), or
+    * a live broker already on the socket (:class:`BrokerAlreadyRunningError`).
+
+    ``reset`` (``--reset``) opts into moving a corrupt db aside and recreating it.
     """
-    server = BrokerServer(sock_path, db_path, logger)
+    server = BrokerServer(sock_path, db_path, logger, reset=reset)
     try:
         asyncio.run(server.serve())
     except KeyboardInterrupt:
         logger.info("interrupted; shutting down")
     except SockPathTooLongError as exc:
+        print(f"it2agent-broker: {exc}", file=sys.stderr)
+        return 1
+    except schema.CorruptDatabaseError as exc:
+        print(f"it2agent-broker: {exc}", file=sys.stderr)
+        return 1
+    except BrokerAlreadyRunningError as exc:
         print(f"it2agent-broker: {exc}", file=sys.stderr)
         return 1
     return 0

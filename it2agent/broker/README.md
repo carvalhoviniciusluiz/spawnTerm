@@ -173,6 +173,49 @@ across a broker restart):
 Schema: migration **v2** adds `messages` (with per-recipient `(recipient,id)`
 and `(recipient,state,id)` indexes) and `ack_cursors` (per-agent high-water id).
 
+### Resilience & retention (#133)
+
+The broker degrades cleanly under real-world failure modes and bounds its own
+growth, so it is safe to leave running.
+
+**Startup / failure modes:**
+
+* **Corrupt/unreadable db** — on open the db is integrity-checked; a bad file is
+  refused with a clear, actionable message and a nonzero exit (never a raw
+  traceback) and is **never silently recreated** (that would be silent data
+  loss). Recover from a backup, or run `serve --reset` to move the corrupt file
+  aside (as `<db>.corrupt-<ts>`) and start fresh.
+* **Orphan socket** — a leftover socket file from a dead broker is detected (a
+  connect probe gets `ECONNREFUSED`) and reclaimed so bind succeeds; a socket a
+  **live** broker still owns is refused with a clear "already running" message
+  rather than clobbered.
+* **Write failure (disk full / I/O error)** — writes are transactional (WAL); a
+  failed write rolls back and returns a structured `storage` error for that one
+  op. The db stays consistent (`PRAGMA quick_check` still `ok`) and the process
+  stays up.
+
+**Retention + vacuum** (mailbox + handoff history are append-only):
+
+| Op / subcommand | Request | Response |
+| --- | --- | --- |
+| `prune` | `{"op":"prune","max_age_days?":7,"keep_handoffs?":K}` | `{"ok":true,"pruned_messages":N,"pruned_handoffs":M,"max_age_days":7.0}` |
+| `vacuum` | `{"op":"vacuum"}` | `{"ok":true,"pages_before":N,"pages_after":M}` |
+
+`prune` deletes **only acked** messages older than `max_age_days` (default
+**7**; un-acked messages are never pruned at any age), optionally caps handoff
+history to the last `keep_handoffs` versions per `(agent_id, goal)`, and always
+preserves ack cursors and exactly-once delivery (`messages.id` is `AUTOINCREMENT`
+so ids are never reused). `vacuum` runs `VACUUM` to reclaim freed space on disk.
+A janitor/daemon can call them over the socket, or via the CLI:
+
+```sh
+python3 it2agent/broker/it2agent_broker.py prune --max-age-days 7 --keep-handoffs 50
+python3 it2agent/broker/it2agent_broker.py vacuum
+```
+
+Schema: migration **v5** adds a `messages(state, created_at)` index that backs
+the retention sweep (additive — an existing db upgrades in place).
+
 ### op-dispatch API (extensibility)
 
 Ops are entries in a registry keyed by name. #35/#36/#37 add ops without touching
